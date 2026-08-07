@@ -1,0 +1,68 @@
+# anaviz — 2-container architecture
+#
+#   datasource  : real HLT data (TimescaleDB) + /archive/* API on :9000
+#                 DB exposed on host :5434 so host-side ingest can write it.
+#                 This is the source of truth; never cleared by the app.
+#   project     : the viz app on :8000 + its own cache DB (host :5433).
+#                 eventhistory here is only a cache hydrated over HTTP from
+#                 the datasource, so /api/clear-cache is safe.
+services:
+  datasource:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: anaviz:latest
+    container_name: anaviz-datasource
+    command: ["uvicorn", "server.archive_server:app", "--host", "0.0.0.0", "--port", "9000"]
+    environment:
+      POSTGRES_USER: dcs
+      POSTGRES_PASSWORD: dcs
+      POSTGRES_DB: dcs
+      DCSVIZ_DB: postgresql://dcs:dcs@localhost:5432/dcs
+    ports:
+      - "9000:9000"
+      - "5434:5432"
+    volumes:
+      - anaviz_datasource_pgdata:/var/lib/postgresql/data
+      - ./db/init/002_schema.sql:/docker-entrypoint-initdb.d/002_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/archive/extent || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  project:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: anaviz:latest
+    container_name: anaviz-project
+    command: ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      POSTGRES_USER: dcs
+      POSTGRES_PASSWORD: dcs
+      POSTGRES_DB: dcs
+      DCSVIZ_DB: postgresql://dcs:dcs@localhost:5432/dcs
+      DCSVIZ_ARCHIVE: http://datasource:9000
+      DATA_SOURCE: http
+    depends_on:
+      datasource:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+      - "5433:5432"
+    volumes:
+      - anaviz_cache_pgdata:/var/lib/postgresql/data
+      - ./db/init/002_schema.sql:/docker-entrypoint-initdb.d/002_schema.sql:ro
+      - ./db/rollups_init.sql:/docker-entrypoint-initdb.d/003_rollups.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/extent || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  anaviz_cache_pgdata:
+  anaviz_datasource_pgdata:
