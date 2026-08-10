@@ -7,9 +7,17 @@ import {
   plot, lastRenderData,
   destroyPlot, chartUpdate, buildLegend,
   renderScorePanel, setZoom, clearZoom, watchChartResize,
-  setChartCursor, setHoverSync,
+  setChartCursor, setHoverSync, setChartDrawSync, setTooltipEnricher,
+  getValuesAtTime,
 } from './chart.js';
-import { initHeatmap, updateHeatmap, highlightColumn } from './heatmap.js';
+import {
+  initHeatmap, updateHeatmap, highlightColumn, redrawHeatmap,
+  setHeatmapTooltipExtra,
+} from './heatmap.js';
+import {
+  updateHistograms, clearHistograms, setHistogramHover,
+  clearHistogramHover, binInfoLine,
+} from './histogram.js';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 let channels      = [];
@@ -22,6 +30,7 @@ let archiveExtent = null;
 // ── Controls ──────────────────────────────────────────────────────────────────
 const showScore   = () => $("#showScore").checked;
 const showHeatmap = () => $("#showHeatmap").checked;
+const showHist    = () => $("#showHist").checked;
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
 async function loadChannels() {
@@ -173,7 +182,11 @@ async function fetchData() {
         .catch(() => null)
     : Promise.resolve(null);
 
-  const heatmapPromise = (showHeatmap() && selected.length)
+  // Heatmap is only fetched on the settling request (not the aborted
+  // leading-edge fetches of a scroll/zoom burst): aborting a heatmap request
+  // mid-flight left it showing the OLD range — the desync that needed a
+  // toggle-off/on to repair. On the settle request it is never aborted.
+  const heatmapPromise = (showHeatmap() && selected.length && !navBurst)
     ? api("/api/heatmap", {
         t0: view.t0, t1: view.t1,
         // Backend caps px at 2000 — on wide windows the visible canvas width
@@ -250,9 +263,19 @@ async function fetchData() {
   if (showHeatmap()) {
     hmWrap.style.display = '';
     if (heatmapData) updateHeatmap(heatmapData, hmNameMap());
-    else console.warn("heatmap fetch failed for", new Date(view.t0), "→", new Date(view.t1));
+    else if (!navBurst) console.warn("heatmap fetch failed for", new Date(view.t0), "→", new Date(view.t1));
   } else {
     hmWrap.style.display = 'none';
+  }
+
+  // ── Histograms (derive from the chart's own series — no extra fetch) ─────
+  const histWrap = document.getElementById('histwrap');
+  if (showHist()) {
+    histWrap.style.display = '';
+    if (hasData && lastRenderData) updateHistograms(selected, lastRenderData);
+    else clearHistograms();
+  } else {
+    histWrap.style.display = 'none';
   }
 
   // ── Stats bar ─────────────────────────────────────────────────────────────
@@ -324,6 +347,18 @@ $("#filter").addEventListener("input", e => renderChanList(e.target.value));
   });
 });
 
+// Histograms rebuild from the last chart data — instant, no refetch needed.
+$("#showHist").addEventListener("change", () => {
+  const wrap = document.getElementById('histwrap');
+  if (showHist()) {
+    wrap.style.display = '';
+    if (lastRenderData) updateHistograms(selected, lastRenderData);
+  } else {
+    wrap.style.display = 'none';
+    clearHistogramHover();
+  }
+});
+
 $("#perAxis").addEventListener("change", () => {
   if (lastRenderData?.data && selected.length) {
     destroyPlot();
@@ -338,12 +373,31 @@ window.addEventListener("resize", () => {
   if (selected.length && view.t0) fetchData();
 });
 
+// Extra HTML for the heatmap tooltip: the graph's values at that time.
+function graphInfoAt(t) {
+  const got = getValuesAtTime(t);
+  if (!got) return '';
+  let html = '<div style="border-top:1px solid #e5e5e5;margin-top:4px;padding-top:3px">';
+  got.selected.forEach((c, i) => {
+    const v = got.values[i];
+    html += `<div class="tt-row">
+      <span class="tt-swatch" style="background:${COLORS[i % COLORS.length]}"></span>
+      <span class="tt-name">${c.name.replace(/^ATLAS_/, '')}</span>
+      <span class="tt-val">${v === null || v === undefined ? '-' : Math.round(v * 1e6) / 1e6}</span>
+    </div>`;
+  });
+  return html + '</div>';
+}
+
 // ── Init heatmap canvas + chart resize watching ──────────────────────────────
 initHeatmap(document.getElementById('heatmap'), {
   onSeek:  seekTo,
-  onHover: setChartCursor,          // heatmap hover → vertical cursor on chart
+  onHover: t => { setChartCursor(t); if (showHist()) setHistogramHover(t); },
 });
-setHoverSync(highlightColumn);      // chart hover → heatmap column highlight
+setHoverSync(t => { highlightColumn(t); if (showHist()) setHistogramHover(t); });
+setChartDrawSync(redrawHeatmap);            // every chart redraw re-syncs the heatmap
+setTooltipEnricher((i, v) => showHist() ? binInfoLine(i, v) : '');
+setHeatmapTooltipExtra(graphInfoAt);        // heatmap tooltip shows the graph's values
 watchChartResize();
 
 // ── Boot ──────────────────────────────────────────────────────────────────────

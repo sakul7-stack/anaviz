@@ -45,6 +45,10 @@
         <input type="checkbox" id="showHeatmap">
         <span>Channel heatmap</span>
       </label>
+      <label class="toggle-row">
+        <input type="checkbox" id="showHist">
+        <span>Value histograms</span>
+      </label>
     </div>
 
     <input type="text" id="filter" placeholder="filter channels…">
@@ -84,6 +88,15 @@
         <div id="heatmap-yaxis"></div>
       </div>
       <div id="hm-tooltip"></div>
+    </div>
+
+    <!-- Per-channel value histograms -->
+    <div id="histwrap" style="display:none">
+      <div class="panel-label">Value Histograms
+        <span class="panel-hint">(per-channel distribution in the current range · drag handles to resize)</span>
+      </div>
+      <div id="hists"></div>
+      <div id="hist-tooltip"></div>
     </div>
   </div>
 </div>

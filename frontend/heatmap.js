@@ -7,23 +7,35 @@
  *   score 1.0 (z ≈ +3, anomalous)     → red   rgb(220,20,  0)
  *
  * Features: channel names on the Y axis, time labels on the X axis,
- * hover crosshair + tooltip (time · channel · z-score), and click-to-jump
- * (recenters the main chart on the clicked timestamp). The time axis is
- * pixel-aligned with the main chart (same canvas width, same bbox gutter),
- * so hovering one view highlights the matching position in the other.
+ * hover crosshair + tooltip (time · channel · z-score · graph values),
+ * and click-to-jump (recenters the main chart on the clicked timestamp).
+ *
+ * SYNC: every column is positioned by TIME through the live chart's own
+ * x-scale (uPlot.valToPos), so the heatmap is pixel-aligned with the graph
+ * even while zooming (stale buckets map to their true time positions) and
+ * never drifts after chart rebuilds/resizes. `redrawHeatmap()` is wired to
+ * the chart's draw hook in app.js so any chart redraw re-syncs this view.
  *
  * Height: a drag handle (#heatmap-resizer) above the panel resizes it; the
  * choice persists in localStorage. Double-click the handle to auto-size.
  */
 
-import { plot as mainPlot } from './chart.js';
+import {
+  plot as mainPlot,
+  getPlotGeometry,
+  xForTime,
+} from './chart.js';
 
-let _canvas   = null;
-let _lastData = null;
-let _nameMap  = {};
-let _onSeek   = null;
-let _onHover  = null;
-let _hover    = { col: -1, row: -1 };
+let _canvas     = null;
+let _lastData   = null;
+let _nameMap    = {};
+let _onSeek     = null;
+let _onHover    = null;
+let _tooltipExtra = null;   // (unixTs) → extra HTML appended to the tooltip
+let _hover      = { col: -1, row: -1 };
+let _raf        = null;
+let _renderedData = null;   // last _lastData actually painted
+let _lastKey    = null;     // last geometry+x-range painted
 
 /**
  * Bind the heatmap to a canvas element.
@@ -60,7 +72,7 @@ export function initHeatmap(canvas, opts = {}) {
         const h = Math.min(Math.max(startH + (startY - ev.clientY), 48), 520);
         plotEl.style.height = h + 'px';
         localStorage.setItem('hmHeight', String(Math.round(h)));
-        requestAnimationFrame(_render);
+        redrawHeatmap();
       };
       const onUp = () => {
         window.removeEventListener('mousemove', onMove);
@@ -72,10 +84,13 @@ export function initHeatmap(canvas, opts = {}) {
     });
     resizer.addEventListener('dblclick', () => {
       localStorage.removeItem('hmHeight');
-      if (_lastData) { _sizeToRows(_lastData.channels.length); requestAnimationFrame(_render); }
+      if (_lastData) { _sizeToRows(_lastData.channels.length); redrawHeatmap(); }
     });
   }
 }
+
+/** Register a callback (unixTs) → extra tooltip HTML (graph values at that time). */
+export function setHeatmapTooltipExtra(fn) { _tooltipExtra = fn; }
 
 /**
  * Render a new heatmap frame.
@@ -91,11 +106,47 @@ export function updateHeatmap(data, nameMap = {}) {
   }
   _nameMap = nameMap;
   _lastData = data;
+  _renderedData = null;   // force a repaint even if geometry is unchanged
   _hover = { col: -1, row: -1 };
   _sizeToRows(data.channels.length);
   // Wait one frame so the panel has laid out (real offsetWidth/Height),
   // otherwise the first paint uses the fallback pixel size.
   requestAnimationFrame(() => { if (_lastData === data) _render(); });
+}
+
+// Current geometry + visible x-range, as a comparable key. The x-range is
+// part of the key because zooming changes the time→pixel mapping WITHOUT
+// changing gut/plotW — those are exactly the repaints we must not skip.
+function _geomKey() {
+  const g = getPlotGeometry();
+  let xmin = null, xmax = null;
+  if (mainPlot?.scales?.x) {
+    xmin = mainPlot.scales.x.min ?? null;
+    xmax = mainPlot.scales.x.max ?? null;
+  }
+  return { cssW: g.cssW, gut: g.gut, plotW: g.plotW, xmin, xmax };
+}
+
+/**
+ * Re-render the heatmap with the CURRENT chart geometry (rAF-coalesced).
+ * Called from the chart's draw hook so zoom/pan/resize/rebuild always
+ * re-sync this view — no need to toggle the panel off/on anymore.
+ * No-ops when neither the data nor the geometry/x-range changed (e.g. the
+ * chart's hover-cursor redraws), so hovering/panning stays cheap.
+ */
+export function redrawHeatmap() {
+  if (!_lastData || _raf) return;
+  const key = _geomKey();
+  if (_renderedData === _lastData && _lastKey &&
+      key.cssW === _lastKey.cssW && key.gut === _lastKey.gut &&
+      key.plotW === _lastKey.plotW && key.xmin === _lastKey.xmin &&
+      key.xmax === _lastKey.xmax) {
+    return;
+  }
+  _raf = requestAnimationFrame(() => {
+    _raf = null;
+    if (_lastData) _render();
+  });
 }
 
 function _sizeToRows(nRows) {
@@ -109,17 +160,30 @@ function _sizeToRows(nRows) {
   plotEl.style.height = Math.min(Math.max(nRows * 13, 56), 176) + 'px';
 }
 
-// Canvas-left CSS pixel geometry shared with the main chart: the time axis
-// starts at the chart's bbox.left (its y-axis gutter) and spans bbox.width.
-function _geometry() {
-  const cssW = _canvas.offsetWidth || 800;
-  const dpr  = window.devicePixelRatio || 1;
-  let gut = 0, plotW = cssW;
-  if (mainPlot?.bbox?.width) {
-    gut   = (mainPlot.bbox.left   || 0) / dpr;
-    plotW = mainPlot.bbox.width         / dpr;
+// Time range covered by the current heatmap data (for the no-plot fallback).
+function _dataRange() {
+  if (!_lastData?.t?.length) return null;
+  return { t0: _lastData.t[0], t1: _lastData.t[_lastData.t.length - 1] };
+}
+
+// Column i pixel span [x0, x1) measured from the canvas left edge, derived
+// from the bucket's time edges mapped through the LIVE chart x-scale.
+function _colSpan(i, geo) {
+  const data = _lastData;
+  const n    = data.t.length;
+  const range  = _dataRange();
+  let lo, hi;
+  if (n > 1) {
+    const dt = (data.t[n - 1] - data.t[0]) / (n - 1);
+    lo = data.t[i] - dt / 2;
+    hi = data.t[i] + dt / 2;
+  } else {
+    lo = hi = data.t[i];
   }
-  return { cssW, gut, plotW };
+  return {
+    x0: geo.gut + xForTime(lo, range),
+    x1: geo.gut + xForTime(hi, range),
+  };
 }
 
 function _render() {
@@ -127,52 +191,89 @@ function _render() {
   const nCols    = data.t.length;
   const nRows    = data.channels.length;
   const ctx      = _canvas.getContext('2d');
-  const { cssW, gut, plotW } = _geometry();
+  const geo      = getPlotGeometry();
+  const { cssW, gut, plotW } = geo;
+
+  // Pin the canvas CSS width to the chart width so the time axis spans the
+  // exact same pixels as the graph (equal even in narrow windows where the
+  // chart forces a minimum width).
+  if (cssW > 0 && _canvas.style.width !== cssW + 'px') {
+    _canvas.style.width = cssW + 'px';
+    document.getElementById('heatmap-xaxis')?.style.setProperty('width', cssW + 'px');
+  }
 
   // Match canvas pixel size to its CSS layout size
   const cssH = _canvas.offsetHeight || 160;
   if (_canvas.width  !== cssW) _canvas.width  = cssW;
   if (_canvas.height !== cssH) _canvas.height = cssH;
 
-  const cellW = plotW / nCols;
   const cellH = Math.max(1, cssH / nRows);
+  const plotR = gut + plotW;
 
   ctx.clearRect(0, 0, cssW, cssH);
+
+  // Pre-compute each column's pixel span (time → pixels via the live chart)
+  const spans = new Array(nCols);
+  for (let c = 0; c < nCols; c++) spans[c] = _colSpan(c, geo);
 
   // Fill cells in two passes: base colours first, then a highlight overlay
   // for the hovered column so it stands out without repainting everything.
   for (let r = 0; r < nRows; r++) {
     const row = data.scores[r];
     for (let c = 0; c < nCols; c++) {
+      const s = spans[c];
+      const x0 = Math.max(gut, Math.round(s.x0));
+      const x1 = Math.min(plotR, Math.round(s.x1));
+      if (x1 <= x0) continue;                 // column is off-screen (zoomed out / stale data)
       const score = row?.[c] ?? 0;
       ctx.fillStyle = _scoreToColor(score);
-      ctx.fillRect(
-        Math.round(gut + c * cellW),
-        Math.round(r * cellH),
-        Math.ceil(cellW),
-        Math.ceil(cellH)
-      );
+      ctx.fillRect(x0, Math.round(r * cellH), x1 - x0, Math.ceil(cellH));
     }
   }
 
   if (_hover.col >= 0 && _hover.col < nCols) {
-    ctx.fillStyle = 'rgba(255,255,255,0.18)';
-    ctx.fillRect(
-      Math.round(gut + _hover.col * cellW), 0,
-      Math.ceil(cellW), cssH
-    );
+    const s = spans[_hover.col];
+    const x0 = Math.max(gut, Math.round(s.x0));
+    const x1 = Math.min(plotR, Math.round(s.x1));
+    if (x1 > x0) {
+      ctx.fillStyle = 'rgba(255,255,255,0.18)';
+      ctx.fillRect(x0, 0, x1 - x0, cssH);
+    }
   }
 
   _renderYAxis(data.channels, nRows, cssH, cellH);
-  _renderXAxis(data.t, nCols, cssW, gut, cellW);
+  _renderXAxis(data.t, nCols, cssW, gut, plotW, spans);
+
+  _renderedData = data;
+  _lastKey = _geomKey();
+}
+
+/** Time under a canvas x (CSS px from the canvas left edge). */
+function _timeAt(x) {
+  if (!_lastData) return null;
+  const g = getPlotGeometry();
+  const range = _dataRange();
+  if (mainPlot) {
+    const t = mainPlot.posToVal(x - g.gut, 'x');
+    if (isFinite(t)) return t;
+  }
+  if (range && range.t1 > range.t0 && x >= g.gut) {
+    return range.t0 + ((x - g.gut) / g.plotW) * (range.t1 - range.t0);
+  }
+  return null;
 }
 
 function _colAt(x) {
   if (!_lastData || !_lastData.t.length) return -1;
-  const { gut, plotW } = _geometry();
-  if (x < gut) return -1;
-  const cellW = plotW / _lastData.t.length;
-  return Math.min(_lastData.t.length - 1, Math.floor((x - gut) / cellW));
+  const t = _timeAt(x);
+  if (t == null) return -1;
+  const arr = _lastData.t;
+  let lo = 0, hi = arr.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] < t) lo = mid; else hi = mid;
+  }
+  return Math.abs(arr[lo] - t) <= Math.abs(arr[hi] - t) ? lo : hi;
 }
 
 function _onMove(e) {
@@ -206,13 +307,13 @@ export function highlightColumn(t) {
     return;
   }
   // binary search nearest bucket centre
+  const arr = _lastData.t;
   let lo = 0, hi = nCols - 1;
   while (hi - lo > 1) {
     const mid = (lo + hi) >> 1;
-    if (_lastData.t[mid] < t) lo = mid; else hi = mid;
+    if (arr[mid] < t) lo = mid; else hi = mid;
   }
-  const col = Math.abs(_lastData.t[lo] - t) <= Math.abs(_lastData.t[hi] - t)
-    ? lo : hi;
+  const col = Math.abs(arr[lo] - t) <= Math.abs(arr[hi] - t) ? lo : hi;
   _hover = { col, row: -1 };
   _render();
 }
@@ -227,7 +328,14 @@ function _showTooltip(e, col, row) {
   const cid   = data.channels[row];
   const name  = _nameMap[cid] || `ch ${cid}`;
   const ts    = new Date(data.t[col] * 1000).toLocaleString();
-  tip.innerHTML = `<b>${name}</b> · ${ts}<br>z-score <b>${z}</b>`;
+  let html = `<b>${name}</b> · ${ts}<br>z-score <b>${z}</b>`;
+  // Show the same per-channel values the main chart tooltip would show at
+  // this time, so the heatmap hover carries the graph's info too.
+  if (_tooltipExtra) {
+    const extra = _tooltipExtra(data.t[col]);
+    if (extra) html += `<div class="hm-extra">${extra}</div>`;
+  }
+  tip.innerHTML = html;
   tip.style.display = 'block';
   tip.style.left = Math.min(window.innerWidth  - 260, e.clientX + 14) + 'px';
   tip.style.top  = Math.min(window.innerHeight - 90,  e.clientY + 14) + 'px';
@@ -283,7 +391,7 @@ function _renderYAxis(channelIds, nRows, cssH, cellH) {
   }
 }
 
-function _renderXAxis(tArr, nCols, cssW, gut, cellW) {
+function _renderXAxis(tArr, nCols, cssW, gut, plotW, spans) {
   const xaxis = document.getElementById('heatmap-xaxis');
   if (!xaxis) return;
   xaxis.innerHTML = '';
@@ -298,7 +406,10 @@ function _renderXAxis(tArr, nCols, cssW, gut, cellW) {
     const col = Math.min(nCols - 1, Math.round(f * (nCols - 1)));
     const label = document.createElement('div');
     label.className = 'hm-xlabel';
-    label.style.left = Math.round(gut + col * cellW + cellW / 2) + 'px';
+    // Position by the column's true pixel span (time-mapped) so labels stay
+    // glued to the data even while the chart is zoomed.
+    const s = spans[col];
+    label.style.left = Math.round((s.x0 + s.x1) / 2) + 'px';
     label.textContent = new Date(ts * 1000).toLocaleString();
     xaxis.appendChild(label);
   }

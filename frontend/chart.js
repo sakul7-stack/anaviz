@@ -10,6 +10,8 @@ let zoom = null;
 
 let _syncT     = null;   // shared time cursor (set from the heatmap)
 let _hoverSync = null;   // callback for chart-hover → heatmap sync
+let _chartDraw = null;   // callback invoked after every chart redraw (zoom/pan/resize/toggle)
+let _tooltipExtra = null; // callback (channelIdx, value) → extra tooltip HTML (histogram bin info)
 
 // ── Export / reset ────────────────────────────────────────────────────────────
 export function destroyPlot() {
@@ -19,6 +21,72 @@ export function destroyPlot() {
 
 export function setZoom(t0, t1) { zoom = [t0, t1]; }
 export function clearZoom()     { zoom = null; }
+
+/**
+ * Geometry of the main chart plot area in CSS pixels, measured from the
+ * chart's left edge: `gut` is the y-axis gutter, `plotW` the plot width.
+ * Derived from the LIVE plot on every call (device-pixel safe: uses the
+ * canvas backing-store scale, not window.devicePixelRatio), so it can never
+ * go stale — this is the single source of truth for heatmap/histogram sync.
+ */
+export function getPlotGeometry() {
+  const wrap = document.getElementById('chart');
+  const cssW = plot ? plot.width
+                    : Math.max(400, wrap ? wrap.clientWidth : 400);
+  if (!plot || !plot.bbox?.width) return { cssW, gut: 0, plotW: cssW, hasPlot: !!plot };
+  const scale = (plot.ctx.canvas.width || 0) / (plot.width || 1) || 1;
+  return {
+    cssW,
+    gut:   plot.bbox.left   / scale,
+    plotW: plot.bbox.width  / scale,
+    hasPlot: true,
+  };
+}
+
+/**
+ * CSS-pixel x position (plot-relative, i.e. 0..plotW inside the plot area)
+ * for a unix timestamp, mapped through the live chart's x-scale.
+ * Falls back to a linear map over `range` (heatmap's own data range) when
+ * there is no plot yet.
+ */
+export function xForTime(t, range = null) {
+  if (plot) {
+    const p = plot.valToPos(t, 'x', false);
+    if (isFinite(p)) return p;
+  }
+  if (range && range.t1 > range.t0) {
+    const g = getPlotGeometry();
+    return ((t - range.t0) / (range.t1 - range.t0)) * g.plotW;
+  }
+  return 0;
+}
+
+/**
+ * Per-channel values (aligned to lastRenderData.selected) at the nearest
+ * data point to time `t` — used by the heatmap/histogram tooltips so they
+ * can show the same info as the main chart. Returns null if no data.
+ */
+export function getValuesAtTime(t) {
+  const lr = lastRenderData;
+  if (!lr?.data?.[0]?.length) return null;
+  const tArr = lr.data[0];
+  const idx  = nearestIndex(tArr, t);
+  if (idx < 0) return null;
+  const values = [];
+  let base = 1;
+  lr.selected.forEach((c, i) => {
+    const stride = lr.bandByChannel?.[i] ? 3 : 1;
+    values.push(lr.data[base]?.[idx] ?? null);
+    base += stride;
+  });
+  return { t: tArr[idx], values, selected: lr.selected };
+}
+
+/** Register a callback fired after every chart redraw (rAF-coalesce it yourself). */
+export function setChartDrawSync(fn) { _chartDraw = fn; }
+
+/** Register a callback (channelIdx, value) → extra tooltip HTML for the chart tooltip. */
+export function setTooltipEnricher(fn) { _tooltipExtra = fn; }
 
 /**
  * Draw a vertical cursor on the main chart at the given time (or clear it).
@@ -101,7 +169,7 @@ export function initPlot(data, selected, onNav, perChannelAxes, bandByChannel) {
     series, axes, scales, bands,
     cursor: { y: true, x: false },
     dblclick: false,
-    hooks: { draw: [drawSync] },
+    hooks: { draw: [drawSync, () => { if (_chartDraw) _chartDraw(); }] },
   };
 
   try {
@@ -138,6 +206,7 @@ export function initPlot(data, selected, onNav, perChannelAxes, bandByChannel) {
         <span class="tt-name">${c.name.replace(/^ATLAS_/, '')}</span>
         <span class="tt-val">${v === null ? '-' : (Math.round(v*1e6)/1e6)}</span>
       </div>`;
+      if (_tooltipExtra) html += _tooltipExtra(i, v);
       base += stride;
     });
 

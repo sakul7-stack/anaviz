@@ -68,7 +68,7 @@ header .stats { color:var(--dim); font-size:12px; margin-left:auto;
 #chanlist label:hover { background:var(--hover); }
 
 /* ── Main panel ────────────────────────────────────────────────────── */
-#main { flex:1; padding:12px; overflow:hidden;
+#main { flex:1; padding:12px; overflow:auto;
         display:flex; flex-direction:column; gap:8px; min-width:0; }
 #chartwrap { flex:1; position:relative; min-height:200px; overflow:hidden; }
 .legend { font-size:12px; padding:4px 0; display:flex; gap:16px; flex-wrap:wrap; }
@@ -103,7 +103,7 @@ header .stats { color:var(--dim); font-size:12px; margin-left:auto;
                    border-radius:3px; margin:1px 0; user-select:none; }
 #heatmap-resizer:hover, #heatmap-resizer.active { background:var(--border); }
 #heatmap-plot { min-width:0; display:flex; flex-direction:column;
-                position:relative; }
+                position:relative; overflow-x:hidden; }
 #heatmap { width:100%; flex:1; min-height:0; display:block; cursor:crosshair; }
 #heatmap-xaxis { position:relative; height:14px; flex-shrink:0; }
 #heatmap-yaxis { position:absolute; right:0; top:0; width:80px;
@@ -128,3 +128,24 @@ header .stats { color:var(--dim); font-size:12px; margin-left:auto;
               box-shadow:0 3px 14px rgba(0,0,0,.12); z-index:110;
               line-height:1.5; white-space:nowrap; }
 #hm-tooltip b { font-weight:600; }
+#hm-tooltip .hm-extra { border-top:1px solid #e5e5e5; margin-top:4px;
+                        padding-top:3px; max-height:90px; overflow:auto; }
+
+/* ── Histogram panel ───────────────────────────────────────────────── */
+#histwrap { flex-shrink:0; }
+#hists { display:flex; flex-direction:column; gap:6px; }
+.hist-row { display:flex; flex-direction:column; }
+.hist-head { display:flex; align-items:center; gap:6px; font-size:11px;
+             font-weight:600; color:var(--fg); margin-bottom:2px; }
+.hist-canvas { width:100%; display:block; background:var(--panel);
+               border:1px solid var(--border); border-radius:4px;
+               cursor:crosshair; }
+.hist-resizer { height:5px; cursor:row-resize; touch-action:none;
+                border-radius:3px; margin:1px 0; user-select:none; }
+.hist-resizer:hover, .hist-resizer.active { background:var(--border); }
+#hist-tooltip { position:fixed; pointer-events:none; display:none;
+                background:rgba(255,255,255,.98); border:1px solid #ddd;
+                padding:6px 9px; font-size:11px; border-radius:6px;
+                box-shadow:0 3px 14px rgba(0,0,0,.12); z-index:120;
+                line-height:1.5; white-space:nowrap; }
+#hist-tooltip b { font-weight:600; }
