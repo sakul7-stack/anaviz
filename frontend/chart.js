@@ -1,26 +1,29 @@
 /**
- * chart.js — uPlot lifecycle, SPOT score panel, hover tooltip.
+ * chart.js — uPlot lifecycle, hover tooltip, legend.
  */
-import { $, COLORS, MAX_CHANS, nearestIndex } from './utils.js';
+import { $, COLORS, MAX_SERIES, nearestIndex } from './utils.js';
 
 export let plot      = null;
-export let scorePlot = null;
 export let lastRenderData = null;
 let zoom = null;
 
 let _syncT     = null;   // shared time cursor (set from the heatmap)
 let _hoverSync = null;   // callback for chart-hover → heatmap sync
 let _chartDraw = null;   // callback invoked after every chart redraw (zoom/pan/resize/toggle)
-let _tooltipExtra = null; // callback (channelIdx, value) → extra tooltip HTML (histogram bin info)
+let _tooltipExtra = null; // callback (entityIndex, value) → extra tooltip HTML (histogram bin info)
 
 // ── Export / reset ────────────────────────────────────────────────────────────
 export function destroyPlot() {
-  if (plot)      { plot.destroy();      plot      = null; }
-  if (scorePlot) { scorePlot.destroy(); scorePlot = null; }
+  if (plot) { plot.destroy(); plot = null; }
 }
 
-export function setZoom(t0, t1) { zoom = [t0, t1]; }
-export function clearZoom()     { zoom = null; }
+export function setZoom(t0, t1) {
+  zoom = [t0, t1];
+}
+
+export function clearZoom() {
+  zoom = null;
+}
 
 /**
  * Geometry of the main chart plot area in CSS pixels, measured from the
@@ -62,7 +65,7 @@ export function xForTime(t, range = null) {
 }
 
 /**
- * Per-channel values (aligned to lastRenderData.selected) at the nearest
+ * Per-entity values (aligned to lastRenderData.selected) at the nearest
  * data point to time `t` — used by the heatmap/histogram tooltips so they
  * can show the same info as the main chart. Returns null if no data.
  */
@@ -75,7 +78,7 @@ export function getValuesAtTime(t) {
   const values = [];
   let base = 1;
   lr.selected.forEach((c, i) => {
-    const stride = lr.bandByChannel?.[i] ? 3 : 1;
+    const stride = lr.bandByEntity?.[i] ? 3 : 1;
     values.push(lr.data[base]?.[idx] ?? null);
     base += stride;
   });
@@ -85,7 +88,7 @@ export function getValuesAtTime(t) {
 /** Register a callback fired after every chart redraw (rAF-coalesce it yourself). */
 export function setChartDrawSync(fn) { _chartDraw = fn; }
 
-/** Register a callback (channelIdx, value) → extra tooltip HTML for the chart tooltip. */
+/** Register a callback (entityIndex, value) → extra tooltip HTML for the chart tooltip. */
 export function setTooltipEnricher(fn) { _tooltipExtra = fn; }
 
 /**
@@ -102,7 +105,7 @@ export function setChartCursor(t) {
 export function setHoverSync(fn) { _hoverSync = fn; }
 
 // ── Main chart init ───────────────────────────────────────────────────────────
-export function initPlot(data, selected, onNav, perChannelAxes, bandByChannel) {
+export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity) {
   const wrap = document.getElementById('chart');
   wrap.innerHTML = '';
   const w = Math.max(400, document.getElementById('chartwrap').clientWidth);
@@ -112,17 +115,17 @@ export function initPlot(data, selected, onNav, perChannelAxes, bandByChannel) {
   const bands  = [];
   let   axes, scales;
 
-  if (perChannelAxes) {
+  if (perEntityAxes) {
     scales = { x: zoom ? { min: zoom[0], max: zoom[1], time: true } : { time: true } };
     axes   = [{ space: 50 }];
-    selected.slice(0, MAX_CHANS).forEach((s, i) => {
+    selected.slice(0, MAX_SERIES).forEach((s, i) => {
       const scaleKey = i === 0 ? 'y' : `y${i}`;
       scales[scaleKey] = {};
       const color = COLORS[i % COLORS.length];
       const base  = series.length;
-      series.push({ label: s.name.replace(/^ATLAS_/, ''), stroke: color,
+      series.push({ label: s.label || s.name, stroke: color,
                     width: 1.5, fill: null, scale: scaleKey });
-      if (bandByChannel?.[i]) {
+      if (bandByEntity?.[i]) {
         series.push({ stroke: 'rgba(0,0,0,0)', points: { show: false }, scale: scaleKey });
         series.push({ stroke: 'rgba(0,0,0,0)', points: { show: false }, scale: scaleKey });
         bands.push({ series: [base + 2, base + 1], fill: color + '26' });
@@ -131,12 +134,12 @@ export function initPlot(data, selected, onNav, perChannelAxes, bandByChannel) {
                   grid: { show: i % 2 === 0 }, size: 70, stroke: color });
     });
   } else {
-    selected.slice(0, MAX_CHANS).forEach((s, i) => {
+    selected.slice(0, MAX_SERIES).forEach((s, i) => {
       const color = COLORS[i % COLORS.length];
       const base  = series.length;
-      series.push({ label: s.name.replace(/^ATLAS_/, ''), stroke: color,
+      series.push({ label: s.label || s.name, stroke: color,
                     width: 1.5, fill: null });
-      if (bandByChannel?.[i]) {
+      if (bandByEntity?.[i]) {
         series.push({ stroke: 'rgba(0,0,0,0)', points: { show: false } });
         series.push({ stroke: 'rgba(0,0,0,0)', points: { show: false } });
         bands.push({ series: [base + 2, base + 1], fill: color + '26' });
@@ -199,13 +202,21 @@ export function initPlot(data, selected, onNav, perChannelAxes, bandByChannel) {
     let html = `<div class="tt-time">${new Date(tArr[idx]*1000).toLocaleString()}</div>`;
     let base = 1;
     lastRenderData.selected.forEach((c, i) => {
-      const stride = lastRenderData.bandByChannel?.[i] ? 3 : 1;
+      const stride = lastRenderData.bandByEntity?.[i] ? 3 : 1;
       const v      = lastRenderData.data[base]?.[idx] ?? null;
+      const meta   = lastRenderData.entityMeta?.[i] || {};
+      const observed = meta.observed?.[idx];
+      const quality = meta.quality?.[idx];
+      const count   = meta.sampleCount?.[idx];
+      const evidence = observed === null || observed === undefined
+        ? 'displayed value is interpolated/rollup-derived'
+        : `observed node · n=${count ?? 1}`;
       html += `<div class="tt-row">
         <span class="tt-swatch" style="background:${COLORS[i%COLORS.length]}"></span>
-        <span class="tt-name">${c.name.replace(/^ATLAS_/, '')}</span>
+        <span class="tt-name">${c.label || c.name}</span>
         <span class="tt-val">${v === null ? '-' : (Math.round(v*1e6)/1e6)}</span>
       </div>`;
+      html += `<div class="tt-meta">${evidence}; quality=${quality ?? 'unknown'}</div>`;
       if (_tooltipExtra) html += _tooltipExtra(i, v);
       base += stride;
     });
@@ -222,10 +233,10 @@ export function initPlot(data, selected, onNav, perChannelAxes, bandByChannel) {
 }
 
 // ── Chart update (called from app.js) ────────────────────────────────────────
-export function chartUpdate(data, selected, onNav, perChannelAxes, bandByChannel) {
+export function chartUpdate(data, selected, onNav, perEntityAxes, bandByEntity, entityMeta = []) {
   lastRenderData = {
-    data, selected: selected.slice(0, MAX_CHANS),
-    bandByChannel, onNav, perChannelAxes,
+    data, selected: selected.slice(0, MAX_SERIES),
+    bandByEntity, entityMeta, onNav, perEntityAxes,
   };
 
   if (!data[0]?.length) {
@@ -238,7 +249,7 @@ export function chartUpdate(data, selected, onNav, perChannelAxes, bandByChannel
   const needRebuild = !plot || plot.series.length !== data.length;
   if (needRebuild) {
     destroyPlot();
-    initPlot(data, selected, onNav, perChannelAxes, bandByChannel);
+    initPlot(data, selected, onNav, perEntityAxes, bandByEntity);
     if (zoom && plot) plot.setScale('x', { min: zoom[0], max: zoom[1] });
   } else {
     try {
@@ -247,7 +258,7 @@ export function chartUpdate(data, selected, onNav, perChannelAxes, bandByChannel
     } catch (err) {
       console.error('uPlot setData error', err);
       destroyPlot();
-      initPlot(data, selected, onNav, perChannelAxes, bandByChannel);
+      initPlot(data, selected, onNav, perEntityAxes, bandByEntity);
     }
   }
 }
@@ -268,82 +279,29 @@ export function watchChartResize() {
     destroyPlot();
     chartUpdate(
       lastRenderData.data, lastRenderData.selected,
-      lastRenderData.onNav, lastRenderData.perChannelAxes,
-      lastRenderData.bandByChannel
+      lastRenderData.onNav, lastRenderData.perEntityAxes,
+      lastRenderData.bandByEntity,
+      lastRenderData.entityMeta
     );
   });
   _resizeObserver.observe(wrap);
-}
-
-// ── SPOT score panel ──────────────────────────────────────────────────────────
-export function renderScorePanel(scoreData) {
-  const wrap = document.getElementById('scorechart');
-  if (scorePlot) { scorePlot.destroy(); scorePlot = null; }
-  if (!scoreData?.t?.length) { wrap.innerHTML = ''; return; }
-
-  const w = Math.max(300, document.getElementById('chartwrap').clientWidth);
-  const t = Float64Array.from(scoreData.t);
-  const s = Float64Array.from(scoreData.score);
-
-  const opts = {
-    width: w, height: 80,
-    series: [
-      {},
-      { stroke: '#FF4444', fill: 'rgba(255,68,68,0.25)', width: 1,
-        points: { show: false } },
-    ],
-    axes: [
-      { show: false },
-      { size: 40, values: (u, vs) => vs.map(v => v?.toFixed(2)) },
-    ],
-    scales: { x: { time: true }, y: { min: 0, max: 1 } },
-    cursor: { show: false },
-  };
-
-  scorePlot = new uPlot(opts, [t, s], wrap);
-
-  // Draw threshold line as a plugin-style overlay
-  if (scoreData.threshold != null) {
-    const thr = scoreData.threshold;
-    const origDraw = scorePlot.redraw.bind(scorePlot);
-    const drawThreshold = () => {
-      const ctx = scorePlot.ctx;
-      const y   = scorePlot.valToPos(thr, 'y', true);
-      if (isNaN(y)) return;
-      ctx.save();
-      ctx.strokeStyle = '#FF0000';
-      ctx.lineWidth   = 1;
-      ctx.setLineDash([6, 3]);
-      ctx.beginPath();
-      ctx.moveTo(scorePlot.bbox.left, y);
-      ctx.lineTo(scorePlot.bbox.left + scorePlot.bbox.width, y);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.restore();
-    };
-    // Patch the draw cycle
-    const origOver = scorePlot.over;
-    drawThreshold();
-    scorePlot.hooks.draw = (scorePlot.hooks.draw || []).concat([drawThreshold]);
-    scorePlot.redraw();
-  }
 }
 
 // ── Legend ────────────────────────────────────────────────────────────────────
 export function buildLegend(selected) {
   const el = $('#legend');
   if (!selected?.length) {
-    el.textContent = 'Select channels + date range, then click Go';
+    el.textContent = 'Select entities + date range, then click Go';
     return;
   }
   el.innerHTML = '';
-  selected.slice(0, MAX_CHANS).forEach((c, i) => {
+  selected.slice(0, MAX_SERIES).forEach((c, i) => {
     const div = document.createElement('div'); div.className = 'legend-item';
     const sw  = document.createElement('span');
     sw.className = 'legend-swatch';
     sw.style.background = COLORS[i % COLORS.length];
     const name = document.createElement('div');
-    name.textContent = c.name.replace(/^ATLAS_/, '');
+    name.textContent = c.label || c.name;
     div.appendChild(sw); div.appendChild(name);
     el.appendChild(div);
   });

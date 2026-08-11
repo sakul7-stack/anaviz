@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>ATLAS DCS Explorer</title>
+<title>Time-series Evidence Explorer</title>
 <link rel="icon" href="static/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.30/dist/uPlot.min.css">
 <link rel="stylesheet" href="static/style.css">
@@ -10,7 +10,7 @@
 </head>
 <body>
 <header>
-  <h1>DCS EXPLORER</h1>
+  <h1>TIME-SERIES EXPLORER</h1>
   <span class="stats" id="stats">-</span>
 </header>
 
@@ -34,52 +34,58 @@
       </div>
 
       <label class="toggle-row">
-        <input type="checkbox" id="perAxis" checked>
-        <span>Per-channel Y axes</span>
-      </label>
-      <label class="toggle-row">
-        <input type="checkbox" id="showScore">
-        <span>SPOT score panel</span>
+        <input type="checkbox" id="perAxis">
+        <span>Per-entity Y axes</span>
       </label>
       <label class="toggle-row">
         <input type="checkbox" id="showHeatmap">
-        <span>Channel heatmap</span>
+        <span>Entity heatmap</span>
       </label>
       <label class="toggle-row">
         <input type="checkbox" id="showHist">
         <span>Value histograms</span>
       </label>
+      <label class="toggle-row hist-bin-control">
+        <span>Histogram bins</span>
+        <input type="number" id="histBins" min="4" max="100" step="1" value="24">
+      </label>
     </div>
 
-    <input type="text" id="filter" placeholder="filter channels…">
-    <div class="help">Check channels · set date range · click Go</div>
-    <div id="chanlist"></div>
+    <details class="ds-panel" id="dsPanel">
+      <summary>Data sources</summary>
+      <label class="ds-label">Active dataset</label>
+      <select id="datasetSelect"></select>
+      <label class="ds-label">Register a config.json</label>
+      <textarea id="configJson" rows="9" spellcheck="false"
+        placeholder='{ "version": 1, "dataset": { "id": "my-source", "label": "My source" }, "source": { "type": "http", "base_url": "http://host:9000" }, "endpoints": { "entities": { "path": "/entities" }, "extent": { "path": "/extent" }, "series": { "path": "/series" } }, "mapping": { "entity_id": "id", "timestamp": "ts", "measures": { "value": {} } } }'></textarea>
+      <button id="registerConfig">Register</button>
+      <div id="configList" class="config-list"></div>
+    </details>
+
+    <input type="text" id="filter" placeholder="filter entities…">
+    <div class="help">Select entities · set date range · click Go</div>
+    <div id="entitylist"></div>
   </div>
 
   <!-- ── Main area ───────────────────────────────────────── -->
   <div id="main">
-    <div class="legend" id="legend">Select channels + date range, then click Go</div>
+    <div class="legend" id="legend">Select entities + date range, then click Go</div>
 
     <!-- Primary chart -->
     <div id="chartwrap"><div id="chart"></div></div>
 
-    <!-- SPOT score panel -->
-    <div id="scorewrap" style="display:none">
-      <div class="panel-label">SPOT Anomaly Score
-        <span class="panel-hint">(score &gt; threshold → anomalous)</span>
-      </div>
-      <div id="scorechart"></div>
-    </div>
-
-    <!-- Cross-channel heatmap -->
+    <!-- Cross-entity heatmap -->
     <div id="heatmapwrap" style="display:none">
       <div id="heatmap-resizer" title="Drag to resize heatmap · double-click to auto-size"></div>
-      <div class="panel-label">Channel Heatmap
-        <span class="panel-hint">(z-score · blue below · dark normal · red above)</span>
+      <div class="panel-label">Temporal z-score Heatmap
+        <span class="panel-hint">(blue negative · green near normal · yellow elevated · red high · gray missing)</span>
+        <span class="panel-state" id="heatmapstate"></span>
         <span class="hm-legend">
           <span class="hm-legend-label">z −3</span>
           <span class="hm-legend-bar"></span>
+          <span class="hm-legend-label">z 0</span>
           <span class="hm-legend-label">z +3</span>
+          <span class="hm-legend-missing">missing</span>
         </span>
       </div>
       <div id="heatmap-plot">
@@ -90,10 +96,10 @@
       <div id="hm-tooltip"></div>
     </div>
 
-    <!-- Per-channel value histograms -->
+    <!-- Per-entity value histograms -->
     <div id="histwrap" style="display:none">
       <div class="panel-label">Value Histograms
-        <span class="panel-hint">(per-channel distribution in the current range · drag handles to resize)</span>
+        <span class="panel-hint">(exact served nodes in the current range · interpolated values excluded · drag handles to resize)</span>
       </div>
       <div id="hists"></div>
       <div id="hist-tooltip"></div>

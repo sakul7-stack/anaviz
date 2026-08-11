@@ -15,8 +15,9 @@ except ImportError:
 @dataclass(frozen=True)
 class Settings:
     db_url: str = "postgresql://dcs:dcs@localhost:5433/dcs"
-    archive_url: str = "http://localhost:9000"
-    data_source: str = "http"  # "http" (default) | "hlt" | "simulator"
+    # Directory of *.json dataset configs loaded at startup; also the
+    # directory the frontend's Data Sources panel persists configs to.
+    config_dir: Path = Path(__file__).resolve().parent.parent / "configs"
 
     @property
     def frontend_path(self) -> Path:
@@ -26,6 +27,6 @@ class Settings:
     def from_env(cls) -> "Settings":
         return cls(
             db_url=os.environ.get("DCSVIZ_DB", cls.db_url),
-            archive_url=os.environ.get("DCSVIZ_ARCHIVE", cls.archive_url),
-            data_source=os.environ.get("DATA_SOURCE", cls.data_source),
+            config_dir=Path(os.environ.get(
+                "DCSVIZ_CONFIG_DIR", cls.config_dir)),
         )

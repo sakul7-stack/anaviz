@@ -12,6 +12,9 @@ SELECT create_hypertable('eventhistory', 'ts',
                          chunk_time_interval => INTERVAL '7 days');
 
 CREATE INDEX ix_eventhistory_elem_ts ON eventhistory (element_id, ts DESC);
+-- A channel/timestamp identifies one source observation.  The ingestion and
+-- cache writers use this index for idempotent conflict-safe inserts.
+CREATE UNIQUE INDEX ux_eventhistory_element_ts ON eventhistory (element_id, ts);
 
 -- FSM state transitions
 CREATE TABLE transitions (

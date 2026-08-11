@@ -8,9 +8,9 @@ Files:
     hlt_val_set.csv     ~632 MB
 
 Usage:
-    python scripts/download_hlt.py                # all three (parallel)
-    python scripts/download_hlt.py --only train   # just train
-    python scripts/download_hlt.py --check        # verify sizes + md5
+    anaviz-download                                     # all three (parallel)
+    anaviz-download --only train                        # just train
+    anaviz-download --check                             # verify sizes + md5
 
 Downloads into data/hlt/. Parallel segmented download (each connection resumes
 its own byte-range) — several times faster than single-stream on throttled

@@ -188,32 +188,3 @@ def test_minmax_lttb_band_envelopes_line():
     expected_max = np.repeat(np.maximum.reduceat(v_max, starts), counts)
     assert np.array_equal(result["min"], expected_min)
     assert np.array_equal(result["max"], expected_max)
-
-def test_group_by_element():
-    """Query rows come back ordered by (element_id, ...); the splitter
-    groups them per element, dropping the element_id column."""
-    from server.app import _group_by_element
-    rows = [(1, "a", 1), (2, "b", 2), (1, "c", 3)]
-    assert _group_by_element(rows) == {1: [("a", 1), ("c", 3)], 2: [("b", 2)]}
-
-
-def test_rollup_payload():
-    from server.app import _rollup_payload
-    rows = [(1.0, 2.0, 3.0, 4.0, 5, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0)]
-    p = _rollup_payload(rows)
-    assert p is not None
-    assert p["t"][0] == 1.0 and p["min"][0] == 2.0 and p["avg"][0] == 4.0
-    assert p["min_t"][0] == 8.0 and p["max_t"][0] == 9.0
-    assert _rollup_payload([]) is None
-
-
-def test_raw_payload_cap():
-    from server.app import _raw_payload
-    rows = [(float(i), float(i * 2)) for i in range(5)]
-    payload, truncated, n = _raw_payload(rows, 3)
-    assert truncated and n == 5
-    assert payload["t"][0] == 0.0 and payload["avg"][-1] == 8.0
-    payload, truncated, n = _raw_payload([(1.0, 2.0)], 3)
-    assert not truncated and n == 1
-    payload, truncated, n = _raw_payload([], 3)
-    assert not truncated and n == 0

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anaviz-datasource"
+version = "0.1.0"
+description = "Independent HLT data API — serves the real ATLAS HLT p-beat dataset over /archive/*"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [{name = "ATLAS DCS Viz Team"}]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "psycopg[binary]>=3.1",
+    "psycopg_pool>=3.2",
+    "numpy>=1.26",
+    "pandas>=2.0",
+]
+
+[project.scripts]
+anaviz-ingest = "anaviz_datasource.ingest_hlt:main"
+anaviz-download = "anaviz_datasource.download_hlt:main"
+
+[tool.setuptools.packages.find]
+include = ["anaviz_datasource", "anaviz_datasource.*"]

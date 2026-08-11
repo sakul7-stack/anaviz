@@ -1,13 +1,13 @@
 /**
- * heatmap.js — canvas-based cross-channel heatmap renderer.
+ * heatmap.js — canvas-based cross-entity heatmap renderer.
  *
  * Visual encoding:
  *   score 0.0 (z ≈ -3, below normal) → blue  rgb(0,  20, 180)
  *   score 0.5 (z =  0, normal)        → dark  rgb(10, 10,  10)
  *   score 1.0 (z ≈ +3, anomalous)     → red   rgb(220,20,  0)
  *
- * Features: channel names on the Y axis, time labels on the X axis,
- * hover crosshair + tooltip (time · channel · z-score · graph values),
+ * Features: entity names on the Y axis, time labels on the X axis,
+ * hover crosshair + tooltip (time · entity · z-score · graph values),
  * and click-to-jump (recenters the main chart on the clicked timestamp).
  *
  * SYNC: every column is positioned by TIME through the live chart's own
@@ -84,7 +84,7 @@ export function initHeatmap(canvas, opts = {}) {
     });
     resizer.addEventListener('dblclick', () => {
       localStorage.removeItem('hmHeight');
-      if (_lastData) { _sizeToRows(_lastData.channels.length); redrawHeatmap(); }
+      if (_lastData) { _sizeToRows(_lastData.entity_ids.length); redrawHeatmap(); }
     });
   }
 }
@@ -94,12 +94,19 @@ export function setHeatmapTooltipExtra(fn) { _tooltipExtra = fn; }
 
 /**
  * Render a new heatmap frame.
- * @param {Object} data   Result from GET /api/heatmap
- *   { t: float[], channels: int[], scores: float[][] }
- * @param {Object} nameMap  element_id → display name
+ * @param {Object} data   Canonical matrix data adapted for this renderer
+ *   { t: float[], entity_ids: string[], scores: (float|null)[][] }
+ * @param {Object} nameMap  entity ID → display label
  */
 export function updateHeatmap(data, nameMap = {}) {
-  if (!_canvas || !data?.t?.length || !data?.channels?.length) {
+  if (!_canvas || !data?.t?.length || !data?.entity_ids?.length) {
+    _lastData = null;
+    _renderedData = null;
+    _hover = { col: -1, row: -1 };
+    if (_canvas) {
+      const ctx = _canvas.getContext('2d');
+      ctx.clearRect(0, 0, _canvas.width, _canvas.height);
+    }
     _clearYAxis();
     _clearXAxis();
     return;
@@ -108,7 +115,7 @@ export function updateHeatmap(data, nameMap = {}) {
   _lastData = data;
   _renderedData = null;   // force a repaint even if geometry is unchanged
   _hover = { col: -1, row: -1 };
-  _sizeToRows(data.channels.length);
+  _sizeToRows(data.entity_ids.length);
   // Wait one frame so the panel has laid out (real offsetWidth/Height),
   // otherwise the first paint uses the fallback pixel size.
   requestAnimationFrame(() => { if (_lastData === data) _render(); });
@@ -189,7 +196,7 @@ function _colSpan(i, geo) {
 function _render() {
   const data     = _lastData;
   const nCols    = data.t.length;
-  const nRows    = data.channels.length;
+  const nRows    = data.entity_ids.length;
   const ctx      = _canvas.getContext('2d');
   const geo      = getPlotGeometry();
   const { cssW, gut, plotW } = geo;
@@ -225,8 +232,8 @@ function _render() {
       const x0 = Math.max(gut, Math.round(s.x0));
       const x1 = Math.min(plotR, Math.round(s.x1));
       if (x1 <= x0) continue;                 // column is off-screen (zoomed out / stale data)
-      const score = row?.[c] ?? 0;
-      ctx.fillStyle = _scoreToColor(score);
+      const score = row?.[c];
+      ctx.fillStyle = score == null ? 'rgb(125,125,125)' : _scoreToColor(score);
       ctx.fillRect(x0, Math.round(r * cellH), x1 - x0, Math.ceil(cellH));
     }
   }
@@ -241,7 +248,7 @@ function _render() {
     }
   }
 
-  _renderYAxis(data.channels, nRows, cssH, cellH);
+  _renderYAxis(data.entity_ids, nRows, cssH, cellH);
   _renderXAxis(data.t, nCols, cssW, gut, plotW, spans);
 
   _renderedData = data;
@@ -280,8 +287,8 @@ function _onMove(e) {
   if (!_lastData) return;
   const col = _colAt(e.offsetX);
   const cssH = _canvas.offsetHeight || 160;
-  const cellH = cssH / _lastData.channels.length;
-  const row = Math.min(_lastData.channels.length - 1, Math.floor(e.offsetY / cellH));
+  const cellH = cssH / _lastData.entity_ids.length;
+  const row = Math.min(_lastData.entity_ids.length - 1, Math.floor(e.offsetY / cellH));
   if (col !== _hover.col) {
     _hover = { col, row };
     _render();
@@ -323,13 +330,17 @@ function _showTooltip(e, col, row) {
   const tip  = document.getElementById('hm-tooltip');
   if (!tip || col < 0 || row < 0 || !data?.t?.[col]) { _hideTooltip(); return; }
   const score = data.scores?.[row]?.[col];
-  if (score === undefined) { _hideTooltip(); return; }
-  const z     = (score * 6 - 3).toFixed(2);
-  const cid   = data.channels[row];
+  const cid   = data.entity_ids[row];
   const name  = _nameMap[cid] || `ch ${cid}`;
   const ts    = new Date(data.t[col] * 1000).toLocaleString();
-  let html = `<b>${name}</b> · ${ts}<br>z-score <b>${z}</b>`;
-  // Show the same per-channel values the main chart tooltip would show at
+  let html = `<b>${name}</b> · ${ts}<br>`;
+  if (score == null) {
+    html += '<span class="hm-missing">no source sample in this time bucket</span>';
+  } else {
+    const z = (score * 6 - 3).toFixed(2);
+    html += `z-score <b>${z}</b>`;
+  }
+  // Show the same per-entity values the main chart tooltip would show at
   // this time, so the heatmap hover carries the graph's info too.
   if (_tooltipExtra) {
     const extra = _tooltipExtra(data.t[col]);
@@ -348,28 +359,30 @@ function _hideTooltip() {
 
 /**
  * Map a normalised score [0, 1] to a CSS color string.
- * 0 → blue, 0.5 → near-black, 1 → red
+ * 0 → blue, 0.5 → light green, 0.75 → yellow, 1 → red
  */
 function _scoreToColor(score) {
+  const stops = [
+    [0.00, [49, 54, 149]],   // strong negative deviation: blue
+    [0.25, [0, 166, 81]],    // mild negative: green
+    [0.50, [166, 217, 106]], // normal: light green
+    [0.75, [255, 235, 59]],  // mild positive: yellow
+    [1.00, [215, 48, 39]],   // strong positive deviation: red
+  ];
   const s = Math.max(0, Math.min(1, score));
-  if (s < 0.5) {
-    // Blue → dark
-    const t   = s / 0.5;
-    const red = Math.round(t * 10);
-    const grn = Math.round(t * 10);
-    const blu = Math.round(180 - t * 170);
-    return `rgb(${red},${grn},${blu})`;
-  } else {
-    // Dark → red
-    const t   = (s - 0.5) / 0.5;
-    const red = Math.round(10 + t * 210);
-    const grn = Math.round(10 - t * 10);
-    const blu = Math.round(10 - t * 10);
-    return `rgb(${red},${grn},${blu})`;
+  for (let i = 1; i < stops.length; i++) {
+    if (s <= stops[i][0]) {
+      const [a, ca] = stops[i - 1];
+      const [b, cb] = stops[i];
+      const t = (s - a) / (b - a);
+      const rgb = ca.map((v, j) => Math.round(v + t * (cb[j] - v)));
+      return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+    }
   }
+  return 'rgb(215,48,39)';
 }
 
-function _renderYAxis(channelIds, nRows, cssH, cellH) {
+function _renderYAxis(entityIds, nRows, cssH, cellH) {
   const yaxis = document.getElementById('heatmap-yaxis');
   if (!yaxis) return;
   yaxis.innerHTML = '';
@@ -380,13 +393,13 @@ function _renderYAxis(channelIds, nRows, cssH, cellH) {
   const step    = Math.max(1, Math.ceil(labelH / cellH));
 
   for (let r = 0; r < nRows; r += step) {
-    const cid   = channelIds[r];
+    const cid   = entityIds[r];
     const label = document.createElement('div');
     label.className = 'hm-label';
     label.style.top = Math.round(r * cellH + cellH / 2) + 'px';
     const name = _nameMap[cid];
     label.textContent = name || `ch ${cid}`;
-    label.title = `element_id ${cid}`;
+    label.title = `entity ${cid}`;
     yaxis.appendChild(label);
   }
 }

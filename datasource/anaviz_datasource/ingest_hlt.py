@@ -15,9 +15,9 @@ CSV format:
     Values     = float Hz rates, NaN = missing
 
 Usage:
-    python -m server ingest --data-dir data/hlt
-    python -m server ingest --data-dir data/hlt --files train
-    python -m server ingest --data-dir data/hlt --files all
+    anaviz-ingest --data-dir data/hlt
+    anaviz-ingest --data-dir data/hlt --files train
+    anaviz-ingest --data-dir data/hlt --files all
 
 The target DB is the DATASOURCE container (host port 5434), which owns the
 real HLT data and serves it over /archive/* on :9000. The project container
@@ -68,6 +68,38 @@ def ingest_file(path: Path, col_to_eid: dict[str, int],
     written = 0
     buf     = io.StringIO()
 
+    # Load each COPY buffer into a temporary staging table, then merge it into
+    # the uniquely keyed hypertable.  COPY itself has no ON CONFLICT clause,
+    # so staging is what makes interrupted/repeated file loads idempotent.
+    cur.execute(
+        "CREATE TEMP TABLE IF NOT EXISTS _hlt_ingest_stage ("
+        "element_id INTEGER NOT NULL, ts TIMESTAMPTZ NOT NULL, "
+        "value DOUBLE PRECISION NOT NULL, quality_flag SMALLINT NOT NULL) "
+        "ON COMMIT DELETE ROWS")
+
+    def flush_buffer() -> None:
+        nonlocal buf
+        if buf.tell() == 0:
+            return
+        buf.seek(0)
+        with cur.copy(
+            "COPY _hlt_ingest_stage (element_id, ts, value, quality_flag) "
+            "FROM STDIN WITH (FORMAT csv)"
+        ) as cp:
+            while True:
+                chunk = buf.read(COPY_CHUNK)
+                if not chunk:
+                    break
+                cp.write(chunk.encode())
+        cur.execute(
+            "INSERT INTO eventhistory (element_id, ts, value, quality_flag) "
+            "SELECT element_id, ts, value, quality_flag FROM _hlt_ingest_stage "
+            "ON CONFLICT (element_id, ts) DO UPDATE SET "
+            "value = EXCLUDED.value, quality_flag = EXCLUDED.quality_flag")
+        cur.execute("TRUNCATE _hlt_ingest_stage")
+        conn.commit()
+        buf = io.StringIO()
+
     print(f"  Reading {path.name} ({path.stat().st_size/1e6:.0f} MB) ...")
 
     # Read in chunks to avoid loading 2 GB at once
@@ -90,35 +122,13 @@ def ingest_file(path: Path, col_to_eid: dict[str, int],
 
         # Flush COPY buffer periodically
         if buf.tell() >= COPY_CHUNK:
-            buf.seek(0)
-            with cur.copy(
-                "COPY eventhistory (element_id, ts, value, quality_flag) "
-                "FROM STDIN WITH (FORMAT csv)"
-            ) as cp:
-                while True:
-                    chunk = buf.read(COPY_CHUNK)
-                    if not chunk:
-                        break
-                    cp.write(chunk.encode())
-            conn.commit()
-            buf = io.StringIO()
+            flush_buffer()
 
         if chunk_n % 50 == 0:
             print(f"    ... {written:,} rows so far", end="\r", flush=True)
 
     # Final flush
-    if buf.tell() > 0:
-        buf.seek(0)
-        with cur.copy(
-            "COPY eventhistory (element_id, ts, value, quality_flag) "
-            "FROM STDIN WITH (FORMAT csv)"
-        ) as cp:
-            while True:
-                chunk = buf.read(COPY_CHUNK)
-                if not chunk:
-                    break
-                cp.write(chunk.encode())
-        conn.commit()
+    flush_buffer()
 
     print(f"    {written:,} rows written from {path.name}        ")
     return written
@@ -159,6 +169,18 @@ def ingest(data_dir: str, files: str, db_url: str) -> None:
     except Exception as e:
         sys.exit(f"ERROR: {e}")
     cur = conn.cursor()
+    try:
+        cur.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_eventhistory_element_ts "
+            "ON eventhistory (element_id, ts)")
+        conn.commit()
+    except psycopg.errors.UniqueViolation as exc:
+        conn.rollback()
+        sys.exit(
+            "ERROR: eventhistory already contains duplicate (element_id, ts) "
+            "rows. Refusing to guess which source value is authoritative; "
+            "repair or recreate the datasource volume, then re-run ingestion."
+        )
 
     # hardware_mapping
     print(f"[3/4] Writing hardware_mapping ({len(columns)} channels) ...")
@@ -186,10 +208,12 @@ def ingest(data_dir: str, files: str, db_url: str) -> None:
 
     print(f"\nDone! {total:,} rows ingested into the datasource DB.")
     print("\nNext — the datasource /archive/* API on :9000 now serves this data.")
-    print("  Start/restart the stack with:")
-    print("  sudo docker compose up -d --build")
+    print("  Start the stack with:")
+    print("  make db-up && make app-up   (or: sudo docker compose up -d --build)")
     print("  Then open http://localhost:8000")
-    print("  (Rollups are refreshed ON DEMAND by the app — no precompute.)")
+    print("  (In the app's Data sources panel, register this API with a")
+    print("   config.json pointing at http://datasource:9000; the project")
+    print("   hydrates its cache on demand — nothing is precomputed.)")
 
 
 def main() -> None:

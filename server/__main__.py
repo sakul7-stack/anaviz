@@ -1,4 +1,9 @@
-"""Entry point: python -m server <serve|ingest> [args...]"""
+"""Entry point: python -m server <serve> [args...]
+
+The project is dataset-independent and has no HLT knowledge. HLT download and
+ingest tooling lives in the standalone `anaviz-datasource` package
+(`pip install -e ./datasource`, then `anaviz-download` / `anaviz-ingest`).
+"""
 from __future__ import annotations
 
 import sys
@@ -15,15 +20,9 @@ def main() -> None:
             if a == "--host" and i + 1 < len(args): host = args[i + 1]
             if a == "--port" and i + 1 < len(args): port = int(args[i + 1])
         uvicorn.run("server.app:app", host=host, port=port, reload=True)
-
-    elif cmd == "ingest":
-        from server.ingest_hlt import main as ingest_main
-        sys.argv = ["ingest"] + sys.argv[2:]
-        ingest_main()
-
     else:
         print("Usage: python -m server serve [--host H] [--port P]", file=sys.stderr)
-        print("       python -m server ingest [--data-dir D] [--files train|train+test|all]",
+        print("HLT tooling: pip install -e ./datasource && anaviz-ingest --help",
               file=sys.stderr)
         sys.exit(1)
 

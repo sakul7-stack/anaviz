@@ -1,5 +1,6 @@
-# anaviz project container — TimescaleDB + Python app for both services.
-# `docker-compose.yml` overrides `command` per service.
+# anaviz PROJECT image — the dataset-independent viz app only.
+# This image contains ZERO HLT code: no datasource/ directory at all.
+# It reads dataset configs from configs/ and hydrates a generic cache.
 FROM timescale/timescaledb:latest-pg16
 
 RUN apk update \
@@ -10,6 +11,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY server ./server
 COPY frontend ./frontend
+COPY configs ./configs
 RUN pip install --no-cache-dir . \
  || pip install --break-system-packages --no-cache-dir .
 
@@ -18,4 +20,4 @@ RUN chmod +x /usr/local/bin/anaviz-entrypoint
 
 ENV PATH="/usr/local/bin:${PATH}"
 ENTRYPOINT ["/usr/local/bin/anaviz-entrypoint"]
-EXPOSE 8000 9000
+EXPOSE 8000

@@ -1,293 +1,295 @@
-"""FastAPI server — 10 REST endpoints + static frontend."""
+"""FastAPI composition: dataset registry, canonical routes, config management,
+and legacy compatibility facades.
+
+The project is dataset-independent: every registered ``config.json`` yields a
+``ConfigurableHttpAdapter`` that hydrates a fixed-schema cache namespace.
+Nothing is preloaded — the user registers their own API + config.json through
+``POST /api/configs`` (or a config dropped into ``DCSVIZ_CONFIG_DIR``). The
+only HLT-specific code lives in the datasource container, never here.
+"""
 from __future__ import annotations
 
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
 
-import numpy as np
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 from psycopg_pool import AsyncConnectionPool
 
-from .api.archive import ArchiveClient, archive_from_settings
-from .api.cache import (
-    READAHEAD_CAP_DAYS,
-    drain_background,
-    ensure_cache_table,
-    fetch_and_cache_multi,
-    get_archive_extent,
-    readahead,
-    refresh_rollups,
-    reset_probed_empty,
-    refresh_status,
-    spawn_background,
+from .api.common import drain_background, spawn_background
+from .api.config import DatasetConfig, load_configs_from_dir, parse_config
+from .api.configurable import ConfigurableHttpAdapter, GenericDatasetCache
+from .api.contracts import (
+    DatasetAdapter,
+    DatasetSchema,
+    DatasetSummary,
+    EntityPage,
+    MatrixQuery,
+    MatrixResult,
+    SeriesQuery,
+    SeriesQueryResponse,
+    TimeExtent as CanonicalTimeExtent,
 )
 from .config import Settings
-from .downsample import downsample
-from .downsample.resolution import RAW_ROW_CAP, select_resolution
 
 settings = Settings.from_env()
 
 pool: AsyncConnectionPool | None = None
-archive: ArchiveClient | None = None
+dataset_adapters: dict[str, ConfigurableHttpAdapter] = {}
+_registered_configs: dict[str, DatasetConfig] = {}
+_config_fingerprints: dict[str, str] = {}
+
+# Legacy route helpers (facades over the default adapter)
+def _require_pool() -> AsyncConnectionPool:
+    if pool is None:
+        raise HTTPException(503, "database pool is not ready")
+    return pool
 
 
-def parse_ts(s: str) -> datetime:
-    try:
-        return datetime.fromtimestamp(float(s), tz=timezone.utc)
-    except ValueError:
-        pass
-    try:
-        dt = datetime.fromisoformat(s)
-        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-    except ValueError:
-        raise HTTPException(400, f"bad timestamp: {s!r}")
+def _get_dataset_adapter(dataset_id: str | None = None) -> DatasetAdapter:
+    if not dataset_adapters:
+        raise HTTPException(503, "dataset adapters are not ready")
+    if dataset_id is None:
+        return next(iter(dataset_adapters.values()))
+    adapter = dataset_adapters.get(dataset_id)
+    if adapter is None:
+        raise HTTPException(404, f"unknown dataset: {dataset_id}")
+    return adapter
+
+
+def _default_adapter() -> ConfigurableHttpAdapter:
+    if not dataset_adapters:
+        raise HTTPException(503, "no datasets are configured")
+    return next(iter(dataset_adapters.values()))
+
+
+def _register(config: DatasetConfig) -> ConfigurableHttpAdapter:
+    """Build (or replace) the adapter + fresh cache namespace for a config."""
+    existing = dataset_adapters.get(config.dataset.id)
+    if existing is not None:
+        # New fingerprint => fresh namespace; the old namespace is dropped so
+        # a changed schema can never leak stale rows into the new one.
+        spawn_background(existing.cache.drop_dataset())
+        existing_old = _registered_configs.get(config.dataset.id)
+        dataset_adapters.pop(config.dataset.id, None)
+        if existing_old is not None:
+            del _registered_configs[config.dataset.id]
+    dataset_key = f"{config.dataset.id}:{config.fingerprint()}"
+    cache = GenericDatasetCache(_require_pool(), dataset_key)
+    adapter = ConfigurableHttpAdapter(config, cache)
+    dataset_adapters[config.dataset.id] = adapter
+    _registered_configs[config.dataset.id] = config
+    _config_fingerprints[config.dataset.id] = config.fingerprint()
+    return adapter
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global pool, archive
-    pool = AsyncConnectionPool(settings.db_url, min_size=1, max_size=8, open=False)
+    global pool
+    pool = AsyncConnectionPool(
+        settings.db_url, min_size=1, max_size=8, open=False)
     await pool.open()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
-            await ensure_cache_table(cur)
-    archive = archive_from_settings(settings)
-    await get_archive_extent(archive)
+            await GenericDatasetCache.ensure_tables(cur)
+    for config in load_configs_from_dir(settings.config_dir):
+        try:
+            _register(config)
+            print(f"  dataset {config.dataset.id!r} registered "
+                  f"({config.dataset.label})")
+        except Exception as exc:
+            print(f"  dataset {config.dataset.id!r} failed to register: {exc}")
     yield
+    await drain_background()
+    for adapter in dataset_adapters.values():
+        await adapter.aclose()
     await pool.close()
-    await archive.aclose()
 
 
 app = FastAPI(title="anaviz", lifespan=lifespan)
 
 
-# ── Helper functions ──────────────────────────────────────────────────────────
-
-def _group_by_element(rows: list[tuple]) -> dict[int, list[tuple]]:
-    grouped: dict[int, list[tuple]] = {}
-    for row in rows:
-        grouped.setdefault(row[0], []).append(row[1:])
-    return grouped
+class ConfigRegistration(BaseModel):
+    """POST /api/configs body: a raw config.json object (env refs allowed)."""
+    config: dict = Field(..., description="the full config.json payload")
 
 
-def _rollup_payload(rows: list[tuple]) -> dict | None:
-    if not rows:
-        return None
-    (bucket, v_min, v_max, v_avg, _,
-     v_first, v_last, min_t, max_t, first_t, last_t) = zip(*rows)
-    return {
-        "t": np.array(bucket), "min": np.array(v_min), "max": np.array(v_max),
-        "avg": np.array(v_avg), "first": np.array(v_first), "last": np.array(v_last),
-        "min_t": np.array(min_t), "max_t": np.array(max_t),
-        "first_t": np.array(first_t), "last_t": np.array(last_t),
-    }
+class ConfigSummary(BaseModel):
+    id: str
+    label: str
+    description: str | None = None
+    fingerprint: str
+    capabilities: list[str]
 
 
-def _raw_payload(rows: list[tuple[float, float]], cap: int) -> tuple[dict, bool, int]:
-    if not rows:
-        return {"t": np.array([]), "avg": np.array([])}, False, 0
-    t_arr = np.array([r[0] for r in rows])
-    v_arr = np.array([r[1] for r in rows])
-    return {"t": t_arr, "avg": v_arr}, len(rows) > cap, len(rows)
+# ── Dataset discovery and configuration registry ─────────────────────────────
+
+@app.get("/api/datasets", response_model=list[DatasetSummary])
+async def datasets():
+    """Discover datasets without exposing source or database-specific fields."""
+    summaries = []
+    for adapter in dataset_adapters.values():
+        schema = await adapter.describe()
+        summaries.append(DatasetSummary(
+            id=schema.id,
+            label=schema.label,
+            description=schema.description,
+            capabilities=schema.capabilities,
+        ))
+    return summaries
 
 
-async def _fetch_raw_rows(
-    conn, element_ids: list[int], start: datetime, end: datetime
-) -> tuple[list[tuple], dict[int, int]]:
-    if not element_ids:
-        return [], {}
-    cur = await conn.execute(
-        "SELECT element_id, extract(epoch FROM ts)::float8, value, total "
-        "FROM (SELECT element_id, ts, value, ROW_NUMBER() OVER "
-        "  (PARTITION BY element_id ORDER BY ts DESC) AS rn, "
-        "  COUNT(*) OVER (PARTITION BY element_id) AS total "
-        "  FROM eventhistory WHERE element_id = ANY(%s) "
-        "  AND ts>=%s AND ts<%s) q WHERE q.rn <= %s "
-        "ORDER BY element_id, ts",
-        (element_ids, start, end, RAW_ROW_CAP + 1))
-    rows = await cur.fetchall()
-    return rows, {eid: total for eid, _, _, total in rows}
+@app.get("/api/configs", response_model=list[ConfigSummary])
+async def configs():
+    """List registered configs (never raw header/secret values)."""
+    return [
+        ConfigSummary(
+            id=cfg.dataset.id,
+            label=cfg.dataset.label,
+            description=cfg.dataset.description,
+            fingerprint=cfg.fingerprint(),
+            capabilities=list(cfg.capabilities),
+        )
+        for cfg in _registered_configs.values()
+    ]
 
 
-def _group_raw(rows: list[tuple]) -> dict[int, list[tuple[float, float]]]:
-    return {eid: [(ts, val) for ts, val, _ in per_eid]
-            for eid, per_eid in _group_by_element(rows).items()}
+@app.post("/api/configs", response_model=ConfigSummary, status_code=201)
+async def register_config(registration: ConfigRegistration):
+    """Validate and register a new dataset from a config.json payload."""
+    try:
+        config = parse_config(registration.config)
+    except ValueError as exc:
+        raise HTTPException(400, f"invalid configuration: {exc}") from exc
+    adapter = _register(config)
+    await adapter.describe()   # fail fast on an unusable source contract
+    return ConfigSummary(
+        id=config.dataset.id,
+        label=config.dataset.label,
+        description=config.dataset.description,
+        fingerprint=config.fingerprint(),
+        capabilities=list(config.capabilities),
+    )
 
 
-async def _query_series_multi(
-    conn, element_ids: list[int], start: datetime, end: datetime, res,
-) -> tuple[dict[int, tuple[dict, bool, int]], dict[int, int]]:
-    if res.is_raw:
-        rows, counts = await _fetch_raw_rows(conn, element_ids, start, end)
-        return ({eid: _raw_payload(_group_raw(rows).get(eid, []), RAW_ROW_CAP)
-                 for eid in element_ids}, counts)
-
-    cur = await conn.execute(
-        f"SELECT element_id, extract(epoch FROM bucket)::float8, "
-        f"v_min, v_max, v_avg, n, v_first, v_last, "
-        f"extract(epoch FROM min_ts)::float8, "
-        f"extract(epoch FROM max_ts)::float8, "
-        f"extract(epoch FROM first_ts)::float8, "
-        f"extract(epoch FROM last_ts)::float8 "
-        f"FROM {res.table} WHERE element_id = ANY(%s) "
-        f"AND bucket>=%s AND bucket<%s ORDER BY element_id, bucket",
-        (element_ids, start, end))
-    grouped = _group_by_element(await cur.fetchall())
-
-    results: dict[int, tuple[dict, bool, int]] = {}
-    counts: dict[int, int] = {}
-    fallback: list[int] = []
-    for eid in element_ids:
-        rows = grouped.get(eid, [])
-        payload = _rollup_payload(rows)
-        if payload is None:
-            fallback.append(eid)
-        else:
-            results[eid] = (payload, False, len(payload["t"]))
-            counts[eid] = int(sum(r[4] for r in rows))
-
-    if fallback:
-        rows, raw_counts = await _fetch_raw_rows(conn, fallback, start, end)
-        grouped = _group_raw(rows)
-        for eid in fallback:
-            results[eid] = _raw_payload(grouped.get(eid, []), RAW_ROW_CAP)
-            counts[eid] = raw_counts.get(eid, 0)
-    return results, counts
+@app.delete("/api/configs/{dataset_id}", status_code=204)
+async def unregister_config(dataset_id: str):
+    """Remove a dataset and drop its cache namespace."""
+    adapter = dataset_adapters.get(dataset_id)
+    if adapter is None:
+        raise HTTPException(404, f"unknown dataset: {dataset_id}")
+    await adapter.cache.drop_dataset()
+    dataset_adapters.pop(dataset_id, None)
+    _registered_configs.pop(dataset_id, None)
+    _config_fingerprints.pop(dataset_id, None)
+    await adapter.aclose()
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+@app.get("/api/datasets/{dataset_id}/schema", response_model=DatasetSchema)
+async def dataset_schema(dataset_id: str):
+    return await _get_dataset_adapter(dataset_id).describe()
+
+
+@app.get("/api/datasets/{dataset_id}/entities", response_model=EntityPage)
+async def dataset_entities(
+    dataset_id: str,
+    search: str | None = None,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=10000),
+):
+    return await _get_dataset_adapter(dataset_id).entities(search, offset, limit)
+
+
+@app.get(
+    "/api/datasets/{dataset_id}/extent", response_model=CanonicalTimeExtent)
+async def dataset_extent(dataset_id: str):
+    return await _get_dataset_adapter(dataset_id).extent()
+
+
+@app.post("/api/query", response_model=SeriesQueryResponse)
+async def canonical_query(request: SeriesQuery):
+    try:
+        return await _get_dataset_adapter(request.dataset_id).query(request)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/matrix", response_model=MatrixResult)
+async def canonical_matrix_query(request: MatrixQuery):
+    try:
+        return await _get_dataset_adapter(request.dataset_id).matrix(request)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+# ── Legacy compatibility facades (over the default adapter) ──────────────────
 
 @app.get("/api/extent")
 async def extent():
-    result = await archive.extent()
-    return {"t_min": result.t_min, "t_max": result.t_max}
+    result = await _default_adapter().extent()
+    return {"t_min": result.start, "t_max": result.end}
 
 
 @app.get("/api/channels")
 async def channels():
-    rows = await archive.channels()
-    return [{"element_id": c.element_id, "name": c.name} for c in rows]
+    page = await _default_adapter().entities(limit=10_000)
+    return [{"element_id": item.id, "name": item.label} for item in page.items]
 
 
 @app.get("/api/series")
 async def series(
-    t0: str, t1: str,
-    element_id: list[int] = Query(min_length=1, max_length=64),
+    t0: str,
+    t1: str,
+    element_id: list[str] = Query(min_length=1, max_length=64),
     px: int = Query(default=1000, ge=50, le=8000),
     k: int = Query(default=2, ge=1, le=4),
     algo: str = Query(default="M4", pattern="^(LTTB|M4|MINMAXLTTB|RAW)$"),
 ):
-    start, end = parse_ts(t0), parse_ts(t1)
-    span = (end - start).total_seconds()
-    if span <= 0:
-        raise HTTPException(400, "t1 must be after t0")
-
-    budget = px * k
-    resolution = select_resolution(span, px)
-    query_start = time.perf_counter()
-
-    async with pool.connection() as conn:
-        async with conn.transaction():
-            archive_start = time.perf_counter()
-            fetched, errors = await fetch_and_cache_multi(
-                archive, conn.cursor(), element_id, start, end)
-            archive_ms = (time.perf_counter() - archive_start) * 1000
-    all_intervals = [iv for intervals in fetched.values() for iv in intervals]
-    if all_intervals:
-        await refresh_rollups(pool, all_intervals)
-
-    ok_ids = [eid for eid in element_id if eid not in errors]
-    async with pool.connection() as conn:
-        payloads, raw_counts = await _query_series_multi(conn, ok_ids, start, end, resolution)
-
-    margin = timedelta(seconds=min(span, READAHEAD_CAP_DAYS * 86400))
+    adapter = _default_adapter()
+    schema = await adapter.describe()
+    measure_id = schema.measures[0].id if schema.measures else "value"
+    request = SeriesQuery(
+        dataset_id=adapter.dataset_id,
+        entity_ids=[f"{adapter.dataset_id}:{eid}" for eid in element_id],
+        measure_ids=[measure_id],
+        range={"start": t0, "end": t1},
+        resolution={"strategy": "auto", "pixel_width": px,
+                    "points_per_pixel": k},
+        downsampling=algo,
+    )
+    try:
+        response = await adapter.query(request)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     results = []
-    for eid in element_id:
-        if eid in errors:
-            results.append({"element_id": eid, "error": errors[eid]})
-            continue
-        spawn_background(readahead(pool, archive, eid, start, end, margin))
-        payload, truncated, n_scanned = payloads[eid]
-        payload, downsample_ms = downsample(payload, algo, budget)
-        out = {key: np.round(np.array(arr), 6).tolist()
-               for key, arr in payload.items()}
+    for item in response.series:
+        metrics = item.metrics
         results.append({
-            "element_id": eid,
-            "resolution": resolution.name,
-            "algo": algo,
-            "rows_raw": raw_counts.get(eid, 0),
-            "rows_scanned": n_scanned,
-            "rows_returned": len(out["t"]),
-            "truncated": truncated,
-            "query_ms": round((time.perf_counter() - query_start) * 1000, 1),
-            "archive_ms": round(archive_ms, 1),
-            "ds_ms": round(downsample_ms, 2),
-            "series": out,
+            "element_id": item.entity_id,
+            "resolution": item.resolution,
+            "algo": response.provenance.downsampling,
+            "rows_raw": metrics.rows_source,
+            "rows_scanned": metrics.rows_scanned,
+            "rows_returned": metrics.rows_returned,
+            "truncated": metrics.truncated,
+            "expected_step_seconds": item.expected_step_seconds,
+            "gap_intervals": item.gaps,
+            "gap_count": len(item.gaps),
+            "quality_summary": item.quality_summary,
+            "data_fidelity": item.fidelity,
+            "query_ms": metrics.query_ms,
+            "archive_ms": metrics.source_ms,
+            "ds_ms": metrics.downsample_ms,
+            "series": {
+                "t": item.points.t,
+                "avg": item.points.value,
+                "quality_flag": item.points.quality,
+                "sample_count": item.points.sample_count,
+            },
         })
     return results
-
-
-@app.get("/api/transitions")
-async def transitions(t0: str, t1: str, system_id: int | None = None):
-    start, end = parse_ts(t0), parse_ts(t1)
-    rows = await archive.transitions(start.timestamp(), end.timestamp(), system_id)
-    return [
-        {
-            "transition_id": r.transition_id,
-            "system_id": r.system_id,
-            "old": r.old,
-            "new": r.new,
-            "ts": r.ts.timestamp(),
-            "operator_id": r.operator_id,
-        }
-        for r in rows
-    ]
-
-
-@app.get("/api/anomaly-score")
-async def anomaly_score(
-    element_id: int,
-    t0: str,
-    t1: str,
-    train_span: int = Query(default=3600, ge=300, le=86400),
-):
-    """Per-timestep SPOT anomaly score for a channel in [t0, t1]."""
-    from .api.spot import SPOT
-
-    start, end = parse_ts(t0), parse_ts(t1)
-    train_start = start - timedelta(seconds=train_span)
-
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            "SELECT extract(epoch FROM ts)::float8, value "
-            "FROM eventhistory WHERE element_id=%s AND ts>=%s AND ts<%s ORDER BY ts",
-            (element_id, train_start, start),
-        )
-        train_rows = await cur.fetchall()
-        cur = await conn.execute(
-            "SELECT extract(epoch FROM ts)::float8, value "
-            "FROM eventhistory WHERE element_id=%s AND ts>=%s AND ts<%s ORDER BY ts",
-            (element_id, start, end),
-        )
-        test_rows = await cur.fetchall()
-
-    if not train_rows or not test_rows:
-        return {"element_id": element_id, "t": [], "score": [], "threshold": None}
-
-    train_t, train_v = zip(*train_rows)
-    test_t, test_v = zip(*test_rows)
-    spot = SPOT()
-    threshold = spot.fit(np.array(train_v, dtype=float))
-    scores = spot.score(np.array(test_v, dtype=float))
-    return {
-        "element_id": element_id,
-        "t": list(test_t),
-        "score": np.round(scores, 4).tolist(),
-        "threshold": round(float(threshold), 4),
-    }
 
 
 @app.get("/api/heatmap")
@@ -297,42 +299,52 @@ async def heatmap_endpoint(
     px: int = Query(default=200, ge=10, le=2000),
     channel_ids: str | None = None,
 ):
-    """Z-score heatmap grid for multiple channels over [t0, t1]."""
-    from .api.heatmap import build_heatmap
-
-    start, end = parse_ts(t0), parse_ts(t1)
+    adapter = _default_adapter()
     if channel_ids:
-        ids = [int(x) for x in channel_ids.split(",") if x.strip()]
+        ids = [f"{adapter.dataset_id}:{cid.strip()}"
+               for cid in channel_ids.split(",") if cid.strip()]
     else:
-        rows = await archive.channels()
-        ids = [c.element_id for c in rows]
-    if len(ids) > 200:                       # keep the grid readable / query bounded
-        ids = ids[:200]
-    return await build_heatmap(pool, ids, start, end, px)
+        page = await adapter.entities(limit=200)
+        ids = [item.id for item in page.items]
+    try:
+        result = await adapter.matrix(MatrixQuery(
+            dataset_id=adapter.dataset_id,
+            entity_ids=ids,
+            measure_id="value",
+            range={"start": t0, "end": t1},
+            pixel_width=px,
+        ))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {
+        "t": result.t,
+        "channels": result.entity_ids,
+        "scores": result.values,
+        "score_kind": result.value_semantics,
+        "missing_value": None,
+        "data_fidelity": result.fidelity,
+    }
 
 
 @app.get("/api/status")
 async def status():
-    """Which rollup views are currently being refreshed."""
-    return {"refreshing": refresh_status()}
+    return {"refreshing": []}
 
 
 @app.get("/api/clear-cache")
 async def clear_cache():
     await drain_background()
-    async with pool.connection() as conn:
+    async with _require_pool().connection() as conn:
         async with conn.cursor() as cur:
-            await cur.execute(
-                "TRUNCATE eventhistory, transitions, "
-                "cache_coverage, eh_1m, eh_5m, eh_1h, eh_1d "
-                "CASCADE")
-    reset_probed_empty()
+            await GenericDatasetCache.clear_all(cur)
     return {"ok": True}
 
 
 # ── Static frontend ───────────────────────────────────────────────────────────
 
-app.mount("/static", StaticFiles(directory=str(settings.frontend_path)), name="frontend")
+app.mount(
+    "/static", StaticFiles(directory=str(settings.frontend_path)),
+    name="frontend")
 
 
 @app.get("/")

@@ -59,13 +59,52 @@ header .stats { color:var(--dim); font-size:12px; margin-left:auto;
 .toggle-row input { accent-color:var(--accent); flex:0 0 auto; }
 .help { color:var(--dim); font-size:11px; padding:2px; }
 
-/* ── Channel list ─────────────────────────────────────────────────── */
-#chanlist { flex:1; overflow:auto; }
-#chanlist input { margin-right:6px; }
-#chanlist label { display:flex; align-items:center; gap:6px; padding:3px 6px;
+/* ── Data Sources panel ───────────────────────────────────────── */
+.ds-panel { border:1px solid var(--border); border-radius:5px;
+            background:var(--bg); padding:6px 8px; }
+.ds-panel summary { cursor:pointer; font-size:12px; font-weight:600;
+                    color:var(--dim); user-select:none; padding:2px 0; }
+.ds-panel summary:hover { color:var(--fg); }
+.ds-label { display:block; font-size:11px; color:var(--dim);
+            margin:6px 0 3px; }
+#datasetSelect { width:100%; padding:5px 6px; font-size:12px;
+                 background:var(--bg); color:var(--fg);
+                 border:1px solid var(--border); border-radius:3px; }
+#configJson { width:100%; padding:5px 6px; font-size:10px;
+              font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+              background:var(--bg); color:var(--fg);
+              border:1px solid var(--border); border-radius:3px;
+              resize:vertical; }
+#registerConfig { width:100%; padding:5px 8px; margin-top:4px;
+                  font-size:12px; cursor:pointer; border:1px solid var(--border);
+                  border-radius:3px; background:var(--accent); color:#fff;
+                  font-weight:600; }
+#registerConfig:hover { opacity:.9; }
+.config-list { margin-top:6px; display:flex; flex-direction:column; gap:2px; }
+.config-row { display:flex; align-items:center; gap:4px; font-size:11px;
+              padding:2px 4px; border-radius:3px; }
+.config-row:hover { background:var(--hover); }
+.config-info { flex:1; white-space:nowrap; overflow:hidden;
+               text-overflow:ellipsis; }
+.config-del { border:none; background:transparent; color:var(--dim);
+              cursor:pointer; font-size:11px; padding:2px 4px; border-radius:3px; }
+.config-del:hover { color:#b00; background:var(--hover); }
+
+/* ── Entity list ─────────────────────────────────────────────────── */
+#entitylist { flex:1; overflow:auto; }
+#entitylist input { margin-right:6px; }
+#entitylist label { display:flex; align-items:center; gap:6px; padding:3px 6px;
                   cursor:pointer; border-radius:3px; font-size:12px;
                   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-#chanlist label:hover { background:var(--hover); }
+#entitylist label:hover { background:var(--hover); }
+
+/* ── Empty (no data source) state ─────────────────────────────────── */
+.empty-state { padding:14px 10px; text-align:center; color:var(--dim);
+               border:1px dashed var(--border); border-radius:6px;
+               margin:6px 0; }
+.empty-state .empty-title { font-size:13px; font-weight:600; color:var(--fg);
+                            margin-bottom:6px; }
+.empty-state .empty-sub { font-size:11px; line-height:1.5; }
 
 /* ── Main panel ────────────────────────────────────────────────────── */
 #main { flex:1; padding:12px; overflow:auto;
@@ -90,12 +129,17 @@ header .stats { color:var(--dim); font-size:12px; margin-left:auto;
 #tooltip .tt-val { font-variant-numeric:tabular-nums; min-width:65px;
                    text-align:right; font-weight:500; }
 
-/* ── SPOT score panel ──────────────────────────────────────────────── */
-#scorewrap { flex-shrink:0; }
+#tooltip .tt-meta { color:var(--dim); font-size:10px; margin:0 0 3px 18px; }
+
+/* ── Panel labels ──────────────────────────────────────────────────── */
 .panel-label { font-size:11px; font-weight:600; color:var(--dim);
                text-transform:uppercase; letter-spacing:.5px; margin-bottom:2px; }
 .panel-hint { font-weight:400; text-transform:none; letter-spacing:0; font-size:10px; }
-#scorechart { height:80px; position:relative; }
+.panel-state { margin-left:6px; font-weight:400; text-transform:none;
+               letter-spacing:0; font-size:10px; color:var(--dim); }
+#heatmapstate { font-style:italic; }
+.hist-bin-control { display:flex; align-items:center; justify-content:space-between; }
+.hist-bin-control input { width:58px; padding:2px 4px; font-size:11px; }
 
 /* ── Heatmap panel ─────────────────────────────────────────────────── */
 #heatmapwrap { flex-shrink:0; }
@@ -119,7 +163,12 @@ header .stats { color:var(--dim); font-size:12px; margin-left:auto;
              vertical-align:middle; }
 .hm-legend-bar { width:90px; height:8px; border-radius:2px; display:inline-block;
   background:linear-gradient(90deg,
-    rgb(0,20,180) 0%, rgb(10,10,10) 50%, rgb(220,20,0) 100%); }
+    rgb(49,54,149) 0%, rgb(0,166,81) 25%,
+    rgb(166,217,106) 50%, rgb(255,235,59) 75%,
+    rgb(215,48,39) 100%); }
+.hm-legend-missing { font-size:9px; font-weight:400; color:var(--dim);
+                     background:rgb(125,125,125); padding:0 3px;
+                     border-radius:2px; }
 .hm-legend-label { font-size:9px; font-weight:400; text-transform:none;
                    letter-spacing:0; color:var(--dim); }
 #hm-tooltip { position:fixed; pointer-events:none; display:none;
@@ -128,6 +177,7 @@ header .stats { color:var(--dim); font-size:12px; margin-left:auto;
               box-shadow:0 3px 14px rgba(0,0,0,.12); z-index:110;
               line-height:1.5; white-space:nowrap; }
 #hm-tooltip b { font-weight:600; }
+#hm-tooltip .hm-missing { color:var(--dim); font-style:italic; }
 #hm-tooltip .hm-extra { border-top:1px solid #e5e5e5; margin-top:4px;
                         padding-top:3px; max-height:90px; overflow:auto; }
 

@@ -1,9 +1,9 @@
 /**
- * histogram.js — per-channel value-distribution (histogram) panel.
+ * histogram.js — per-entity value-distribution (histogram) panel.
  *
- * One histogram per selected channel (≤ MAX_CHANS), rendered below the
+ * One histogram per selected entity (≤ MAX_SERIES), rendered below the
  * heatmap. Each is a small canvas with a drag handle so heights are
- * adjustable independently (persisted in localStorage per channel).
+ * adjustable independently (persisted in localStorage per entity).
  *
  * Sync: bins are built from the SAME interpolated series the main chart
  * draws (lastRenderData), so the histogram always reflects the visible
@@ -12,7 +12,7 @@
  * a hovered value falls into (via binInfoLine).
  */
 
-import { $, COLORS, MAX_CHANS } from './utils.js';
+import { $, COLORS, MAX_SERIES } from './utils.js';
 import { getValuesAtTime } from './chart.js';
 
 const DEFAULT_H = 72;
@@ -22,39 +22,44 @@ const LABEL_H   = 16;    // strip at the bottom of each canvas for value ticks
 
 let _rows  = [];          // { eid, idx, name, color, base, bins, canvas }
 let _lastRenderData = null;
+let _binCount = 24;
 let _hover = { t: null, values: null };
 
 /**
  * Rebuild / refresh the histogram rows from the current chart data.
- * @param {Array} selected       channel objects (app state, full list)
- * @param {Object} lastRenderData  chart.js lastRenderData (data, selected, bandByChannel)
+ * @param {Array} selected       entity objects (app state, full list)
+ * @param {Object} lastRenderData  chart.js lastRenderData (data, selected, bandByEntity)
  */
-export function updateHistograms(selected, lastRenderData) {
+export function updateHistograms(selected, lastRenderData, binCount = 24) {
   _lastRenderData = lastRenderData;
+  _binCount = Math.min(100, Math.max(4, Math.round(Number(binCount) || 24)));
   const wrap = document.getElementById('hists');
   if (!wrap) return;
 
-  const sel = (selected || []).slice(0, MAX_CHANS);
-  const eids = sel.map(c => c.element_id).join(',');
+  const sel = (selected || []).slice(0, MAX_SERIES);
+  const eids = sel.map(c => c.entity_id).join(',');
   if (wrap.dataset.eids !== eids) {
     wrap.innerHTML = '';
     wrap.dataset.eids = eids;
     _rows = sel.map((c, i) => _buildRow(wrap, c, i));
   }
 
-  // Row base index into lastRenderData.data for each channel's avg series
+  // Row base index into lastRenderData.data for each entity's avg series
   let base = 1;
   _rows.forEach((row, i) => {
-    const stride = lastRenderData.bandByChannel?.[i] ? 3 : 1;
+    const stride = lastRenderData.bandByEntity?.[i] ? 3 : 1;
     row.base = base;
     base += stride;
   });
 
-  // Rebin from the values the chart actually displays in this range
-  _rows.forEach(row => {
+  // Use exact served nodes for the distribution. Interpolated display values
+  // are useful for a line but must not be counted as observations.
+  _rows.forEach((row, i) => {
     const dataRow = lastRenderData.data?.[row.base];
-    const vals = (dataRow || []).filter(v => v !== null && isFinite(v));
-    row.bins = _makeBins(vals);
+    const observed = lastRenderData.entityMeta?.[i]?.observed;
+    const vals = (observed || dataRow || [])
+      .filter(v => v !== null && v !== undefined && isFinite(v));
+    row.bins = _makeBins(vals, _binCount);
   });
 
   _drawAll();
@@ -78,7 +83,7 @@ function _buildRow(wrap, c, i) {
   sw.className = 'legend-swatch';
   sw.style.background = COLORS[i % COLORS.length];
   const name = document.createElement('span');
-  name.textContent = c.name.replace(/^ATLAS_/, '');
+  name.textContent = c.label || c.name;
   name.title = c.name;
   head.appendChild(sw);
   head.appendChild(name);
@@ -86,7 +91,7 @@ function _buildRow(wrap, c, i) {
   const canvas = document.createElement('canvas');
   canvas.className = 'hist-canvas';
 
-  const saved = Number(localStorage.getItem(`histH_${c.element_id}`));
+  const saved = Number(localStorage.getItem(`histH_${c.entity_id}`));
   canvas.style.height = (saved >= MIN_H ? Math.min(saved, MAX_H) : DEFAULT_H) + 'px';
 
   const resizer = document.createElement('div');
@@ -99,7 +104,7 @@ function _buildRow(wrap, c, i) {
   wrap.appendChild(row);
 
   const entry = {
-    eid: c.element_id, idx: i, name: c.name.replace(/^ATLAS_/, ''),
+    eid: c.entity_id, idx: i, name: c.label || c.name,
     color: COLORS[i % COLORS.length], base: 1, bins: null, canvas,
     binHover: -1,
   };
@@ -137,7 +142,7 @@ function _buildRow(wrap, c, i) {
   return entry;
 }
 
-function _makeBins(vals) {
+function _makeBins(vals, requestedBins = 24) {
   const n = vals.length;
   if (!n) return null;
   let lo = Infinity, hi = -Infinity;
@@ -146,7 +151,7 @@ function _makeBins(vals) {
     if (vals[i] > hi) hi = vals[i];
   }
   if (hi === lo) { hi = lo + 1; lo = lo - 1; }   // single value → one bin
-  const nBins = Math.min(60, Math.max(16, Math.round(Math.sqrt(n))));
+  const nBins = Math.min(100, Math.max(4, Math.round(Number(requestedBins) || 24)));
   const bw = (hi - lo) / nBins;
   const counts = new Array(nBins).fill(0);
   for (let i = 0; i < n; i++) {
@@ -301,10 +306,10 @@ export function clearHistogramHover() {
 
 /**
  * Extra tooltip line for the chart tooltip: which bin a hovered value falls
- * into for that channel. Returns '' when histograms are hidden/no bins.
+ * into for that entity. Returns '' when histograms are hidden/no bins.
  */
-export function binInfoLine(channelIdx, value) {
-  const row = _rows[channelIdx];
+export function binInfoLine(entityIndex, value) {
+  const row = _rows[entityIndex];
   if (!row?.bins || value === null || value === undefined || !isFinite(value)) return '';
   const { edges, counts, lo, hi } = row.bins;
   let b = -1;

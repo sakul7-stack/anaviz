@@ -1,13 +1,13 @@
 """Datasource archive server — serves the real HLT data as the /archive/* API.
 
-This is the "source of truth" container (port 9000). The viz app (project
-container) hydrates its local cache from here over HTTP, so its own
-`eventhistory` is just a cache and clear-cache can never destroy the real data.
+This is the "source of truth" container (port 9000). The project container is
+dataset-independent: a user registers this API (URL + config.json) in the app,
+and the project hydrates its own generic cache (`cache_series`) over HTTP, so
+clear-cache can never destroy the real data.
 
-Schema: the datasource DB holds the same tables as the project cache
-(eventhistory, hardware_mapping, transitions, subsystems). No rollups
-are needed here — the archive serves raw rows; the project builds and refreshes
-rollups on demand.
+Schema: the datasource DB holds the HLT tables (eventhistory, hardware_mapping,
+transitions, subsystems). No rollups are needed here — the archive serves raw
+rows and the project downsamples in memory.
 """
 from __future__ import annotations
 
