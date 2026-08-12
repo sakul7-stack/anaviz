@@ -194,14 +194,3 @@ export function interpTo(allT, tArr, vArr, rawMode, gaps = []) {
 export function alignExact(allT, tArr, vArr) {
   return interpTo(allT, tArr, vArr, true);
 }
-
-/** Format seconds duration as "Xh Ym Zs". */
-export function fmtDuration(sec) {
-  if (sec < 60) {
-    return `${Math.round(sec)}s`;
-  }
-  if (sec < 3600) {
-    return `${Math.floor(sec / 60)}m ${Math.round(sec % 60)}s`;
-  }
-  return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
-}

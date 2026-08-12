@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field
 
 
 ScalarType = Literal["number", "integer", "string", "boolean", "category"]
-EvidenceKind = Literal["score", "flag", "threshold", "interval", "annotation"]
 
 
 class TimeAxisSchema(BaseModel):
@@ -152,17 +151,6 @@ class SeriesQueryResponse(BaseModel):
     provenance: QueryProvenance
 
 
-
-
-class EvidenceQuery(BaseModel):
-    dataset_id: str = "default"
-    plugin: str
-    entity_ids: list[str] = Field(min_length=1, max_length=64)
-    measure_id: str = "value"
-    range: TimeRange
-    parameters: dict[str, Any] = Field(default_factory=dict)
-
-
 class MatrixQuery(BaseModel):
     dataset_id: str = "default"
     entity_ids: list[str] = Field(min_length=1, max_length=200)
@@ -182,24 +170,6 @@ class MatrixResult(BaseModel):
     missing_value: None = None
     fidelity: dict[str, Any] = Field(default_factory=dict)
     provenance: dict[str, Any] = Field(default_factory=dict)
-class EvidenceOutput(BaseModel):
-    kind: EvidenceKind
-    semantics: str
-    unit: str | None = None
-    entity_id: str | None = None
-    measure_id: str | None = None
-    t: list[float] = Field(default_factory=list)
-    values: list[Any] = Field(default_factory=list)
-    ground_truth: bool = False
-
-
-class EvidenceResult(BaseModel):
-    plugin: str
-    version: str
-    outputs: list[EvidenceOutput]
-    parameters: dict[str, Any] = Field(default_factory=dict)
-    calibration: dict[str, Any] = Field(default_factory=dict)
-    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 @runtime_checkable
@@ -220,14 +190,3 @@ class DatasetAdapter(Protocol):
     async def query(self, request: SeriesQuery) -> SeriesQueryResponse: ...
 
     async def matrix(self, request: MatrixQuery) -> MatrixResult: ...
-
-
-@runtime_checkable
-class QueryCache(Protocol):
-    """Optional cache boundary; implementations may use any storage engine."""
-
-    async def get(self, fingerprint: str) -> SeriesQueryResponse | None: ...
-
-    async def put(self, fingerprint: str, value: SeriesQueryResponse) -> None: ...
-
-    async def invalidate_dataset(self, dataset_id: str) -> None: ...

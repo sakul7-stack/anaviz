@@ -1,4 +1,4 @@
-# AGENTS.md — anaviz time-series evidence explorer
+# AGENTS.md — anaviz time-series explorer
 
 Dataset-independent time-series visualization: users bring their own HTTP data
 source plus a `config.json` schema, and Anaviz adapts to it. The canonical
@@ -22,7 +22,7 @@ to the datasource image.
 ```
 server/          FastAPI composition (`app.py`) + archive datasource server
 server/api/      canonical contracts, config model, configurable HTTP adapter
-server/downsample/ M4, LTTB, MinMaxLTTB downsampling
+server/downsample/ M4, LTTB, MinMaxLTTB downsampling + rollup tiers (rollup.py)
 frontend/        Vanilla JS + uPlot/Canvas renderers consuming canonical APIs
 configs/         user-supplied *.json dataset configs; intentionally EMPTY in
                  the repo — nothing is preloaded. Register via the UI or
@@ -56,11 +56,12 @@ anaviz-ingest --data-dir data/hlt --files all \
 #   datasource psql:    sudo docker compose exec datasource psql -U dcs -d dcs
 ```
 
-Tests: `pytest tests/ -q` — 48 offline unit tests for config validation,
+Tests: `pytest tests/ -q` — 72 offline unit tests for config validation,
 fingerprinting, the configurable adapter (extraction, pagination, gap
 preservation, matrix missingness), canonical contracts, downsampling (LTTB /
-M4 / MINMAXLTTB band correctness), and data fidelity. No DB needed. Add a
-`tests/test_api.py` integration suite when the stack is up.
+M4 / MINMAXLTTB band correctness), rollup tier selection + bucket
+aggregation, and data fidelity. No DB needed. Add a `tests/test_api.py`
+integration suite when the stack is up.
 
 ## Rules
 
@@ -75,8 +76,7 @@ M4 / MINMAXLTTB band correctness), and data fidelity. No DB needed. Add a
   config in `configs/` — the app must boot with zero datasets.
 - Keep source-specific identifiers, database columns, and naming rules inside a
   config + `ConfigurableHttpAdapter`. Canonical APIs and frontend renderers use
-  datasets, entities, measures, dimensions, series points, and typed evidence
-  only.
+  datasets, entities, measures, dimensions, and series points only.
 - A user `config.json` describes endpoints, field mappings, pagination, and
   measures. Configs are declarative data only — no code, SQL, or templates.
   Never execute anything parsed from a config.
@@ -87,8 +87,13 @@ M4 / MINMAXLTTB band correctness), and data fidelity. No DB needed. Add a
   compatibility facades over the default adapter while new visualization
   behavior uses `/api/datasets/*`, `/api/configs`, and `POST /api/query`.
 - Keep HTTP fetching, cache SQL, rollup/downsampling decisions, coverage math,
-  and provenance generation in `server/api/configurable.py`; `server/app.py`
-  contains composition and routes only.
+  the no-data-loss SQL bucket aggregation (`read_bucketed`), and provenance
+  generation in `server/api/configurable.py`; `server/app.py` contains
+  composition and routes only.
+- Never truncate a visualization: dense raw ranges (more cached rows than
+  `row_cap`) are aggregated in Postgres over ALL rows into time buckets sized
+  to the pixel budget (exact first/min/max/last per bucket), never cut off at
+  the cap. The response marks `aggregated` + `query_aggregated`.
 - Reuse the downsample modules and `server/api/common.py` helpers already
   present; don't re-implement them.
 - Data pipeline must be resumable: any interrupted ingestion/download can be
@@ -119,10 +124,16 @@ config ships with the repo.
 
 ## Gotchas
 
-- The generic cache tables (`cache_series`, `cache_coverage`) are created by
-  `db/cache_schema.sql` on first boot AND by `GenericDatasetCache.ensure_tables`
-  at app startup. They are shared by every dataset; isolation is by
-  `dataset_key = "<dataset_id>:<config_fingerprint>"`.
+- The generic cache tables (`cache_series`, `cache_coverage`, `cache_rollup`)
+  are created by `db/cache_schema.sql` on first boot AND by
+  `GenericDatasetCache.ensure_tables` at app startup. They are shared by every
+  dataset; isolation is by `dataset_key = "<dataset_id>:<config_fingerprint>"`.
+  `cache_rollup` holds opt-in bucket tiers (first/min/max/last/avg/count)
+  aggregated from raw rows at hydration time. Rollups are strictly opt-in:
+  declaring `rollup_levels=[...]` bucket sizes (seconds) builds exactly those
+  tiers; `rollup_enabled: false` kill-switches them even if levels are
+  declared. Nothing is derived from the source's sampling step — without
+  `rollup_levels`, every range is served from raw rows.
 - The datasource container uses the HLT schema (`datasource/schema.sql`); the
   project container mounts the generic cache schema (`db/cache_schema.sql`)
   instead. Do not mount HLT rollups into the project.

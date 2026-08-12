@@ -145,8 +145,25 @@ class DatasetConfig(BaseModel):
     mapping: Mapping
     pagination: Pagination = Field(default_factory=Pagination)
     expected_step_seconds: float | None = None
+    # On-demand rollup tiers are strictly opt-in: nothing is derived
+    # automatically. Declaring rollup_levels (bucket sizes in seconds) opts a
+    # dataset in; rollup_enabled is a master kill-switch (default true; set
+    # false to force every range to raw rows even if levels are declared).
+    rollup_enabled: bool = True
+    rollup_levels: list[float] | None = None
     row_cap: int = Field(default=200_000, ge=1, le=5_000_000)
     capabilities: list[str] = Field(default_factory=lambda: list(DEFAULT_CAPABILITIES))
+
+    @field_validator("rollup_levels")
+    @classmethod
+    def _rollup_levels_positive(cls, value: list[float] | None) -> list[float] | None:
+        if value is None:
+            return value
+        if not value or any(v <= 0 for v in value):
+            raise ValueError("rollup_levels must be positive bucket sizes in seconds")
+        if len(value) > 12:
+            raise ValueError("rollup_levels must have at most 12 buckets")
+        return sorted(value)
 
     def fingerprint(self) -> str:
         """Stable hash of the resolved configuration (schema => namespace)."""

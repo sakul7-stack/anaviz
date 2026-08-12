@@ -1,14 +1,14 @@
 """Configurable adapter tests: HTTP extraction, pagination, query/matrix paths,
 gap preservation, and opaque-ID translation."""
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import httpx
 import numpy as np
 import pytest
 
 from server.api.common import coverage_gaps, subtract_probed
-from server.api.config import DatasetConfig, parse_config
+from server.api.config import parse_config
 from server.api.configurable import (
     ConfigurableHttpAdapter,
     extract_rows,
@@ -32,7 +32,7 @@ class FakeCache:
                 if e == entity_id and m == measure_id
                 and status == "queried" and b > start and a < end]
 
-    async def store(self, entity_id, measure_id, rows, intervals):
+    async def store(self, entity_id, measure_id, rows, intervals, **kwargs):
         key = (entity_id, measure_id)
         bucket = self.series.setdefault(key, [])
         existing = {(r[0], r[1]) for r in bucket}
@@ -54,6 +54,27 @@ class FakeCache:
         v = np.array([r[1] for r in rows], dtype=float)
         q = np.array([r[2] for r in rows], dtype=np.int16)
         return t, v, q, total, truncated
+
+    async def count(self, entity_id, measure_id, start, end):
+        bucket = self.series.get((entity_id, measure_id), [])
+        return len([r for r in bucket if start <= r[0] < end])
+
+    async def read_bucketed(self, entity_id, measure_id, bucket_s,
+                            start, end, cap):
+        from server.downsample.rollup import aggregate_buckets
+        from server.api.configurable import (
+            RollupData,
+            bucket_rows_to_arrays,
+        )
+        bucket = self.series.get((entity_id, measure_id), [])
+        rows = [r for r in bucket if start <= r[0] < end]
+        if not rows:
+            return RollupData.empty()
+        t = np.array([r[0].timestamp() for r in rows], dtype=float)
+        v = np.array([r[1] for r in rows], dtype=float)
+        q = np.array([r[2] for r in rows], dtype=np.int16)
+        agg = aggregate_buckets(t, v, q, [float(bucket_s)])
+        return bucket_rows_to_arrays(agg.get(float(bucket_s), []))
 
     async def drop_dataset(self):
         self.series.clear()

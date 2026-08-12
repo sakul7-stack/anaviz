@@ -4,7 +4,6 @@ import json
 import pytest
 
 from server.api.config import (
-    DatasetConfig,
     load_configs_from_dir,
     parse_config,
     resolve_env,

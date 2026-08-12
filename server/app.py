@@ -9,7 +9,6 @@ only HLT-specific code lives in the datasource container, never here.
 """
 from __future__ import annotations
 
-import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
@@ -39,7 +38,6 @@ settings = Settings.from_env()
 pool: AsyncConnectionPool | None = None
 dataset_adapters: dict[str, ConfigurableHttpAdapter] = {}
 _registered_configs: dict[str, DatasetConfig] = {}
-_config_fingerprints: dict[str, str] = {}
 
 # Legacy route helpers (facades over the default adapter)
 def _require_pool() -> AsyncConnectionPool:
@@ -81,7 +79,6 @@ def _register(config: DatasetConfig) -> ConfigurableHttpAdapter:
     adapter = ConfigurableHttpAdapter(config, cache)
     dataset_adapters[config.dataset.id] = adapter
     _registered_configs[config.dataset.id] = config
-    _config_fingerprints[config.dataset.id] = config.fingerprint()
     return adapter
 
 
@@ -183,7 +180,6 @@ async def unregister_config(dataset_id: str):
     await adapter.cache.drop_dataset()
     dataset_adapters.pop(dataset_id, None)
     _registered_configs.pop(dataset_id, None)
-    _config_fingerprints.pop(dataset_id, None)
     await adapter.aclose()
 
 
