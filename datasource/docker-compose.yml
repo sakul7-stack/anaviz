@@ -1,0 +1,57 @@
+# anaviz DATASOURCE — standalone project (source of truth for HLT data).
+#
+# This compose brings up ONLY the datasource: real HLT data in TimescaleDB +
+# the /archive/* API on :9000 (DB on host :5434 for host-side ingest). It is
+# completely independent of the anaviz project — it does not know or care that
+# anaviz exists.
+#
+# Re-ingestion safety: the postgres data volume is declared `external` and
+# bound to the EXISTING physical volume (anaviz_anaviz_datasource_pgdata), so
+# bringing this up reuses the already-ingested data. It is NEVER re-created by
+# this file, so your ingest is never repeated.
+#
+# Cross-project discovery: the service joins the external `anaviz_shared`
+# network under the name `datasource`, so the anaviz project (a separate
+# compose project on the same network) can reach it at http://datasource:9000.
+# Create the network once:  docker network create anaviz_shared
+name: anaviz-datasource
+
+services:
+  datasource:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: anaviz-datasource:latest
+    container_name: anaviz-datasource
+    command: ["uvicorn", "--app-dir", "/app", "anaviz_datasource.archive_server:app", "--host", "0.0.0.0", "--port", "9000"]
+    environment:
+      POSTGRES_USER: dcs
+      POSTGRES_PASSWORD: dcs
+      POSTGRES_DB: dcs
+      DCSVIZ_DB: postgresql://dcs:dcs@localhost:5432/dcs
+    ports:
+      - "9000:9000"
+      - "5434:5432"
+    volumes:
+      - datasource_pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/002_schema.sql:ro
+    networks:
+      - anaviz_shared
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/archive/extent || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  # Bound to the pre-existing physical volume so the ingested HLT data is
+  # reused as-is. `external: true` means compose will NOT create or wipe it.
+  datasource_pgdata:
+    external: true
+    name: anaviz_anaviz_datasource_pgdata
+
+networks:
+  anaviz_shared:
+    external: true
+    name: anaviz_shared

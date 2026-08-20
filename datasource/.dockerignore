@@ -1,3 +1,6 @@
+# Build context for the anaviz DATASOURCE image.
+# The Dockerfile copies only anaviz_datasource/, schema.sql, pyproject.toml,
+# README.md — keep the big CSVs and local tooling OUT of the build context.
 __pycache__
 *.pyc
 *.egg-info
@@ -7,3 +10,9 @@ venv
 *.log
 build
 dist
+# Real HLT CSVs (multi-GB) — never send to the Docker daemon
+data
+*.csv
+# Local project files not needed in the image
+Makefile
+docker-compose.yml

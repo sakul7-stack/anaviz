@@ -223,30 +223,20 @@ function startStatusPoll() {
 }
 
 function navTo(t0, t1) {
-  let lo, hi;
-  if (queryRange.t0 === null) {
-    lo = dataExtent?.t0 ?? t0;
-    hi = dataExtent?.t1 ?? t1;
-  } else {
-    const margin = Math.min(queryRange.t1 - queryRange.t0, 30 * 86400);
-    lo = queryRange.t0 - margin;
-    hi = queryRange.t1 + margin;
-    if (dataExtent) {
-      lo = Math.max(lo, dataExtent.t0);
-      hi = Math.min(hi, dataExtent.t1);
-    }
-    if (hi <= lo) {
-      lo = dataExtent.t0;
-      hi = dataExtent.t1;
-    }
-  }
-  const maxSpan = dataExtent ? dataExtent.t1 - dataExtent.t0 : (hi - lo);
+  // Free navigation within the FULL dataset extent. The allowed window is the
+  // dataset extent — NOT the last "Go" range — so zooming or panning into a
+  // new region never snaps back to the initial query range. Falls back to the
+  // requested range / current view only when the extent is unknown.
+  let lo = dataExtent?.t0 ?? Math.min(t0, view.t0 ?? t0);
+  let hi = dataExtent?.t1 ?? Math.max(t1, view.t1 ?? t1);
+  if (hi <= lo) { lo = t0; hi = t1; }
+
+  const maxSpan = hi - lo;
   let span = Math.min(Math.max(t1 - t0, 1), maxSpan);
-  if (span > hi - lo) { lo = dataExtent?.t0 ?? lo; hi = dataExtent?.t1 ?? hi; }
   const c  = (t0 + t1) / 2;
   t0 = c - span / 2; t1 = c + span / 2;
-  if (t0 < lo) { t0 = lo; t1 = Math.min(t0 + span, hi); }
-  if (t1 > hi) { t1 = hi; t0 = Math.max(t1 - span, lo); }
+  if (t0 < lo) { t0 = lo; t1 = lo + span; }
+  if (t1 > hi) { t1 = hi; t0 = hi - span; }
   if (view.t0 === t0 && view.t1 === t1) return;
 
   view = { t0, t1 };

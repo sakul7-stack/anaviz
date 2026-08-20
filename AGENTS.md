@@ -10,53 +10,63 @@ The 2-container architecture remains, with **two fully independent images**:
 the **datasource** image (`datasource/Dockerfile`, a standalone mini-project
 with its own `pyproject.toml`, entrypoint, and CLI) contains only the
 `anaviz_datasource` package — real HLT data + `/archive/*` on :9000; the
-**project** image (`docker/Dockerfile.project`) contains only `server/`,
-`frontend/`, and `configs/` — the dataset-independent viz app whose generic
-cache (`cache_series`, `cache_coverage`) is hydrated over HTTP, so
-`clear-cache` can never destroy the real data. The images share nothing except
-a similar entrypoint. Never add HLT code to the project image or project code
-to the datasource image.
+**project** image (`anaviz/Dockerfile`) contains only `anaviz/server/`,
+`anaviz/frontend/`, and `anaviz/configs/` — the dataset-independent viz app
+whose generic cache (`cache_series`, `cache_coverage`) is hydrated over HTTP,
+so `clear-cache` can never destroy the real data. The images share nothing
+except a similar entrypoint. Never add HLT code to the project image or
+project code to the datasource image.
 
 ## Layout
 
 ```
-server/          FastAPI composition (`app.py`) + archive datasource server
-server/api/      canonical contracts, config model, configurable HTTP adapter
-server/downsample/ M4, LTTB, MinMaxLTTB downsampling + rollup tiers (rollup.py)
-frontend/        Vanilla JS + uPlot/Canvas renderers consuming canonical APIs
-configs/         user-supplied *.json dataset configs; intentionally EMPTY in
+anaviz/          the visualization PROJECT — standalone (compose project: anaviz-project, :8000)
+  docker-compose.yml  external cache volume + shared net; app :8000, cache DB :5433
+  Dockerfile     project image (context ./anaviz); entrypoint.sh; pyproject.toml
+  Makefile       per-project targets (up/down/logs/psql/test)
+  server/        FastAPI composition (`app.py`) + routes/composition only
+  server/api/    canonical contracts, config model, configurable HTTP adapter
+  server/downsample/ M4, LTTB, MinMaxLTTB downsampling + rollup tiers (rollup.py)
+  frontend/      Vanilla JS + uPlot/Canvas renderers consuming canonical APIs
+  configs/       user-supplied *.json dataset configs; intentionally EMPTY in
                  the repo — nothing is preloaded. Register via the UI or
                  POST /api/configs, or drop a config here and restart.
-datasource/      STANDALONE HLT datasource mini-project: its own pyproject.toml,
-                 Dockerfile, entrypoint.sh, and CLI (anaviz-ingest /
-                 anaviz-download). Never imported or packaged by the project.
-db/              generic cache schema (project only)
-data/hlt/        downloaded CSVs (gitignored)
-docker/          project image only: Dockerfile.project + entrypoint.sh
-                 (the datasource has its own Dockerfile + entrypoint inside
-                 datasource/)
+  db/            generic cache schema (project only)
+  tests/         offline unit tests for the project (import `server.*`)
+datasource/      STANDALONE HLT datasource project (compose project: anaviz-datasource, :9000)
+  docker-compose.yml  external data volume + shared net; API :9000, DB :5434
+  Dockerfile, entrypoint.sh, Makefile, pyproject.toml, schema.sql
+  anaviz_datasource/  package + CLI (anaviz-ingest / anaviz-download)
+  data/hlt/      downloaded HLT CSVs (gitignored) — owned by the datasource
 docs/            reference papers (read-only)
+  demo/          presentation material (ODT/PPTX generators, images) — not runtime
+Makefile         root convenience only: `make up` starts both on anaviz_shared net
 ```
+
+There is NO root docker-compose.yml. Each project has its own compose file and
+binds its postgres volume as **external** to the existing physical volume
+(`anaviz_anaviz_datasource_pgdata`, `anaviz_anaviz_cache_pgdata`), so `up`/`down`
+never re-ingest. The two projects find each other over the external
+`anaviz_shared` Docker network (datasource reachable as `http://datasource:9000`).
 
 ## Core commands
 
 ```bash
-sudo docker compose up -d --build                     # both containers
-sudo docker compose up -d --build datasource          # datasource only (:9000, db :5434)
-sudo docker compose up -d --build project             # project only (:8000, cache :5433)
-make db-up && make app-up                             # or the Makefile targets
-pip install -e ".[test]"                              # project host tooling
+make up                                               # both projects (net + datasource + anaviz)
+make -C datasource up                                 # datasource only (:9000, db :5434)
+make -C anaviz up                                     # project only (:8000, cache :5433)
+# each folder is its own compose project: `cd anaviz && docker compose up -d` also works
+pip install -e "./anaviz[test]"                       # project host tooling
 pip install -e ./datasource                           # standalone HLT tooling
-anaviz-download                                       # resumable; re-run to resume
-anaviz-ingest --data-dir data/hlt --files all \
-  --db-url postgresql://dcs:dcs@localhost:5434/dcs    # ingest INTO THE DATASOURCE DB
+cd datasource && python -m anaviz_datasource download --out data/hlt   # resumable
+cd datasource && make ingest                          # ingest data/hlt INTO THE DATASOURCE DB (:5434)
 # → open http://localhost:8000
 #   datasource API: http://localhost:9000/archive/*
-#   project cache psql: sudo docker compose exec project psql -U dcs -d dcs
-#   datasource psql:    sudo docker compose exec datasource psql -U dcs -d dcs
+#   project cache psql: docker compose -f anaviz/docker-compose.yml exec project psql -U dcs -d dcs
+#   datasource psql:    docker compose -f datasource/docker-compose.yml exec datasource psql -U dcs -d dcs
 ```
 
-Tests: `pytest tests/ -q` — 72 offline unit tests for config validation,
+Tests: `pytest anaviz/tests/ -q` — 72 offline unit tests for config validation,
 fingerprinting, the configurable adapter (extraction, pagination, gap
 preservation, matrix missingness), canonical contracts, downsampling (LTTB /
 M4 / MINMAXLTTB band correctness), rollup tier selection + bucket
@@ -106,8 +116,8 @@ integration suite when the stack is up.
   The project cache may be wiped freely — it re-hydrates from :9000.
 - Never ingest into the project cache DB; it is hydrated on demand from the
   configured source.
-- Verify with `python3 -m compileall server datasource/anaviz_datasource` and
-  `for f in frontend/*.js; do node --check "$f"; done` after edits.
+- Verify with `python3 -m compileall anaviz/server datasource/anaviz_datasource`
+  and `for f in anaviz/frontend/*.js; do node --check "$f"; done` after edits.
 
 ## Environment
 
@@ -143,7 +153,8 @@ config ships with the repo.
 - The HLT CSVs are big (~2 GB train, ~1 GB test, ~632 MB val). Ingest with
   `--files all` only when all three are fully downloaded (verify with
   `anaviz-download --check`).
-- Both containers run postgres + uvicorn via `docker/entrypoint.sh`; init
-  scripts run on first boot of an empty volume.
+- Both containers run postgres + uvicorn via their own `entrypoint.sh`
+  (`anaviz/entrypoint.sh` and `datasource/entrypoint.sh`); init scripts run on
+  first boot of an empty volume.
 - The datasource container must be re-ingested after its volume is wiped; the
   project cache re-hydrates from :9000 automatically.

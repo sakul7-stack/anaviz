@@ -1,0 +1,60 @@
+# anaviz PROJECT — standalone, dataset-independent visualization app.
+#
+# This compose brings up ONLY the anaviz project: the generic viz app on :8000
+# plus its own generic cache DB (host :5433). It contains ZERO HLT code and is
+# a complete project on its own — the datasource is just one example source it
+# can be pointed at via a config.json.
+#
+# It talks to a data source only over HTTP. To use the bundled HLT datasource,
+# start that separate project too and register a config with
+# base_url = http://datasource:9000 (resolved over the shared network below).
+# The app boots empty and works fine even if no datasource is running.
+#
+# Re-ingestion safety: nothing here holds real source data. The cache volume is
+# declared `external` and bound to the EXISTING physical cache volume so the
+# on-demand cache is reused; the cache can also be cleared/rehydrated safely.
+# Create the shared network once:  docker network create anaviz_shared
+name: anaviz-project
+
+services:
+  project:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: anaviz-project:latest
+    container_name: anaviz-project
+    command: ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      POSTGRES_USER: dcs
+      POSTGRES_PASSWORD: dcs
+      POSTGRES_DB: dcs
+      DCSVIZ_DB: postgresql://dcs:dcs@localhost:5432/dcs
+      # Only used if a user registers a config referencing this default.
+      DCSVIZ_ARCHIVE: http://datasource:9000
+    ports:
+      - "8000:8000"
+      - "5433:5432"
+    volumes:
+      - cache_pgdata:/var/lib/postgresql/data
+      - ./db/cache_schema.sql:/docker-entrypoint-initdb.d/002_cache.sql:ro
+      - ./configs:/app/configs:ro
+    networks:
+      - anaviz_shared
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/api/datasets || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  # Bound to the pre-existing physical cache volume. `external: true` means
+  # compose will NOT create or wipe it. (The cache also re-hydrates on demand.)
+  cache_pgdata:
+    external: true
+    name: anaviz_anaviz_cache_pgdata
+
+networks:
+  anaviz_shared:
+    external: true
+    name: anaviz_shared

@@ -15,7 +15,7 @@ COPY configs ./configs
 RUN pip install --no-cache-dir . \
  || pip install --break-system-packages --no-cache-dir .
 
-COPY docker/entrypoint.sh /usr/local/bin/anaviz-entrypoint
+COPY entrypoint.sh /usr/local/bin/anaviz-entrypoint
 RUN chmod +x /usr/local/bin/anaviz-entrypoint
 
 ENV PATH="/usr/local/bin:${PATH}"

@@ -10,42 +10,72 @@ source — an API URL + `config.json` — in the *Data sources* panel (or via
 `POST /api/configs`). The bundled datasource container serves the ATLAS HLT
 p-beat dataset, but Anaviz itself contains zero HLT-specific code.
 
+## Repository layout
+
+```
+anaviz/        the visualization PROJECT — its own docker-compose.yml, Dockerfile,
+               Makefile, .dockerignore; server/, frontend/, configs/, db/, tests/
+               (compose project: anaviz-project, app :8000, cache DB :5433)
+datasource/    the example HLT data API — its own docker-compose.yml, Dockerfile,
+               Makefile, .dockerignore; anaviz_datasource/, schema.sql, data/
+               (compose project: anaviz-datasource, API :9000, DB :5434)
+docs/          reference PDFs and notes; docs/demo/ holds presentation material
+Makefile       root convenience: starts both projects on a shared network
+```
+
+The two projects are fully independent: each has its own compose file,
+Dockerfile, Makefile, and build context, and neither imports the other.
+`anaviz/` is a complete project on its own — it talks to a source only over
+HTTP via a `config.json`, and the bundled `datasource/` is just one example
+source. They discover each other over an external Docker network
+(`anaviz_shared`) so the project can reach the datasource at
+`http://datasource:9000`.
+
+**No shared/root compose:** run each project from its own folder (or use the
+root `Makefile` to start both). Each compose binds its postgres volume as
+**external** to the existing physical volume, so bringing the stack up **never
+re-ingests** your data.
+
 ## Quick start
 
 ### 1. Install host tooling (once)
 
 ```bash
-pip install -e ".[test]"
-pip install -e ./datasource      # provides anaviz-download and anaviz-ingest
+pip install -e "./anaviz[test]"      # project host tooling (server package + tests)
+pip install -e ./datasource          # provides anaviz-download and anaviz-ingest
 ```
 
-### 2. Get the HLT CSVs into `data/hlt/`
+### 2. Get the HLT CSVs into `datasource/data/hlt/`
 
 Three files (gitignored): `hlt_train_set.csv` (~2 GB), `hlt_test_set.csv`
-(~995 MB), `hlt_val_set.csv` (~632 MB). Download them (resumable):
+(~995 MB), `hlt_val_set.csv` (~632 MB). Download them (resumable) from inside
+the datasource project:
 
 ```bash
-anaviz-download            # re-run to resume
-anaviz-download --check    # verify completeness
+cd datasource
+python -m anaviz_datasource download --out data/hlt   # or: make download
+python -m anaviz_datasource download --check          # verify completeness
 ```
 
 ### 3. Start the datasource (HLT DB + `/archive/*` API)
 
 ```bash
-sudo docker compose up -d --build datasource
+make -C datasource up          # docker network + datasource (:9000, DB :5434)
 curl http://localhost:9000/archive/extent    # → {"t_min":..., "t_max":...}
 ```
 
-Non-null `t_min`/`t_max` means the DB is up.
+Non-null `t_min`/`t_max` means the DB is up. The data volume is external, so
+this reuses your already-ingested data.
 
 ### 4. Ingest the CSVs into the datasource DB (one-time, slow)
 
 Ingest into the datasource DB (`:5434`) — never into the project cache
-(`:5433`):
+(`:5433`). Run from the datasource folder:
 
 ```bash
-anaviz-ingest --data-dir data/hlt --files all \
-  --db-url postgresql://dcs:dcs@localhost:5434/dcs
+cd datasource
+make ingest        # = python -m anaviz_datasource ingest --data-dir data/hlt \
+                   #     --files all --db-url postgresql://dcs:dcs@localhost:5434/dcs
 ```
 
 `--files train` is the quickest way to see data; `train+test` is the default;
@@ -55,7 +85,7 @@ merges rows instead of duplicating.
 ### 5. Start the project (viz app)
 
 ```bash
-sudo docker compose up -d --build project
+make -C anaviz up              # docker network + project (:8000, cache :5433)
 # → open http://localhost:8000
 ```
 
@@ -64,15 +94,28 @@ First query for a range is slower (hydration); later ones come from the cache.
 ### 6. Everyday use
 
 ```bash
-sudo docker compose up -d     # both containers
-http://localhost:8000         # open the app
+make up                        # start BOTH projects (datasource then anaviz)
+http://localhost:8000          # open the app
+# make down                    # stop both (volumes retained)
 ```
 
-> **Why is the app empty?** Nothing is preloaded — that's the point. Open the
-> **Data sources** panel, paste the config below, click **Register**. (Or drop
-> the same `*.json` into `configs/` and restart the project.)
+> **Why is the app empty?** Nothing is preloaded — that's the point. The repo
+> ships a ready-to-use **`example.json`** at the root that targets the bundled
+> `:9000` datasource. Fastest ways to register it:
 >
-> Ready-to-paste config for the bundled HLT datasource:
+> ```bash
+> # A) via the API (project must be up)
+> curl -X POST http://localhost:8000/api/configs \
+>   -H 'Content-Type: application/json' \
+>   -d "{\"config\": $(cat example.json)}"
+>
+> # B) auto-load on boot — drop it into the project's config dir and restart
+> cp example.json anaviz/configs/ && make -C anaviz up
+> ```
+>
+> Or open the **Data sources** panel in the UI, paste the contents of
+> `example.json`, and click **Register**. The equivalent config is also shown
+> below for reference:
 >
 > ```json
 > {
@@ -275,10 +318,10 @@ with `${VAR}` / `${VAR:-default}`.
 
 ```bash
 source .venv/bin/activate
-pip install -e ".[test]"
-pytest tests/ -q                      # offline unit tests, no DB needed
-python3 -m compileall -q server datasource/anaviz_datasource
-for file in frontend/*.js; do node --check "$file"; done
+pip install -e "./anaviz[test]"
+pytest anaviz/tests/ -q               # offline unit tests, no DB needed
+python3 -m compileall -q anaviz/server datasource/anaviz_datasource
+for file in anaviz/frontend/*.js; do node --check "$file"; done
 git diff --check
 ```
 
@@ -291,7 +334,7 @@ After backend/frontend changes, rebuild the project (this never touches the
 datasource volume):
 
 ```bash
-sudo docker compose up -d --build project
+make -C anaviz up            # rebuild + restart the project only
 ```
 
 Hard-refresh the browser after rebuilding (`Ctrl+Shift+R`).
@@ -300,13 +343,15 @@ Hard-refresh the browser after rebuilding (`Ctrl+Shift+R`).
 
 | Action | Datasource | Project cache |
 |--------|-----------|---------------|
-| Rebuild / restart Compose | none | retained |
+| Rebuild / restart a project (`make -C … up`) | none | retained |
 | `GET /api/clear-cache` | none | truncated, rehydrated on demand |
 | `DELETE /api/configs/{id}` | none | only that dataset's namespace dropped |
-| `docker compose down` | none | volumes retained |
-| `docker compose down -v` | **volume deleted** | volume deleted |
+| `make -C … down` (compose down) | none | volumes retained (external) |
+| `docker volume rm anaviz_anaviz_datasource_pgdata` | **data deleted** | — |
 
-`docker compose down -v` destroys the raw dataset and requires a full
+Because both compose files bind their postgres volumes as **external**, a
+normal `down` never removes data. Only explicitly running `docker volume rm`
+on `anaviz_anaviz_datasource_pgdata` destroys the raw dataset and requires a full
 re-ingest — only use it intentionally.
 
 ## Troubleshooting

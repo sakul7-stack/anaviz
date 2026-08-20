@@ -1,42 +1,39 @@
-# anaviz — launch targets
+# anaviz — root orchestrator for two INDEPENDENT projects.
 #
-# The stack has two containers you can start together or separately:
+#   anaviz/       the visualization app        (make -C anaviz ...)
+#   datasource/   the example HLT data API     (make -C datasource ...)
 #
-#   datasource  : real HLT data + /archive/* API (:9000, postgres :5434)
-#   project     : the viz app (:8000, cache postgres :5433)
+# Each project has its own docker-compose.yml, Dockerfile, .dockerignore and
+# Makefile and can be run entirely on its own. This root Makefile is only a
+# convenience that starts them in a sensible order on a shared network.
 #
-# `make app-up` starts the project and, because compose tracks its dependency,
-# also starts the datasource if it isn't running. Use `--no-deps` (or just
-# `make db-up` first, then `make app-up`) to start the project alone.
+# Data safety: both projects bind their postgres volumes as EXTERNAL to the
+# existing physical volumes, so `up`/`down` NEVER re-ingest or wipe data.
 
-.PHONY: db-up app-up up down ps logs db-shell app-shell rebuild help
+.PHONY: help net up down datasource anaviz ps logs
 
-help:              ## Show these targets
+help:            ## Show these targets
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-12s %s\n", $$1, $$2}'
+	@echo "  (per-project: make -C anaviz help / make -C datasource help)"
 
-db-up:             ## Launch ONLY the datasource database container (:9000, :5434)
-	sudo docker compose up -d --build datasource
+net:             ## Create the shared discovery network (idempotent)
+	@docker network create anaviz_shared >/dev/null 2>&1 || true
 
-app-up:            ## Launch ONLY the project container (:8000, :5433)
-	sudo docker compose up -d --build project
+datasource: net  ## Start the datasource project only
+	$(MAKE) -C datasource up
 
-up:                ## Launch both containers
-	sudo docker compose up -d --build
+anaviz: net      ## Start the anaviz project only
+	$(MAKE) -C anaviz up
 
-down:              ## Stop both containers (volumes retained)
-	sudo docker compose down
+up: datasource anaviz   ## Start both projects (datasource first, then anaviz)
+	@echo "up: datasource :9000 (DB :5434) + anaviz :8000 (cache :5433)"
 
-ps:                ## Container status
-	sudo docker compose ps
+down:            ## Stop both projects (volumes retained)
+	-$(MAKE) -C anaviz down
+	-$(MAKE) -C datasource down
 
-logs:              ## Follow logs from both containers
-	sudo docker compose logs -f
+ps:              ## Status of both projects' containers
+	@docker ps --filter name=anaviz-project --filter name=anaviz-datasource
 
-db-shell:          ## psql into the datasource DB (real data)
-	sudo docker compose exec datasource psql -U dcs -d dcs
-
-app-shell:         ## psql into the project cache DB
-	sudo docker compose exec project psql -U dcs -d dcs
-
-rebuild:           ## Rebuild images and recreate containers (volumes kept)
-	sudo docker compose up -d --build --force-recreate
+logs:            ## Follow logs from both containers
+	@docker logs -f anaviz-project & docker logs -f anaviz-datasource
