@@ -29,7 +29,6 @@ let selected      = [];
 let datasetId     = null;
 let measureId     = "value";
 let view          = { t0: null, t1: null };
-let queryRange    = { t0: null, t1: null };
 let dataExtent    = null;
 
 // ── Controls ──────────────────────────────────────────────────────────────────
@@ -245,19 +244,104 @@ function navTo(t0, t1) {
   $("#dt0").value = toLocalISO(new Date(t0 * 1000));
   $("#dt1").value = toLocalISO(new Date(t1 * 1000));
 
-  // Fetch on the leading edge (first event of a scroll/zoom burst) so the
-  // chart starts filling right away instead of showing an empty stretched
-  // view; then settle on the trailing edge with the final range.
-  if (!navBurst) {
-    navBurst = true;
-    fetchData();
-  }
+  // Keep the gesture smooth: while the user is actively scrolling/dragging we
+  // only rescale the existing plot (cheap, 60fps). The heavy work — querying
+  // the source and rebuilding chart/histograms/heatmap — runs ONCE on the
+  // trailing edge, after movement settles. Doing it mid-gesture (leading edge)
+  // stalled a frame on the first, uncached view of a range ("stuck" zoom).
+  navBurst = true;
   if (navTimer) clearTimeout(navTimer);
   navTimer = setTimeout(() => {
     navTimer = null;
     navBurst = false;
     fetchData();
-  }, 400);
+  }, 180);
+}
+
+// ── Chart-data assembly + panels (helpers for fetchData) ─────────────────────
+
+// Turn canonical series results into the uPlot data matrix plus the per-entity
+// evidence metadata and the aggregate counters shown in the stats bar.
+function buildChartData(results, rawMode) {
+  const allT = buildSharedTimeAxis(results);
+  const data = [allT];
+  const bandByEntity = [];
+  const entityMeta = [];
+  const agg = {
+    scanned: 0, rawTotal: 0, sent: 0, gapTotal: 0,
+    dbMs: 0, dsMs: 0, resName: "raw", respAlgo: "M4", hasData: false,
+  };
+
+  (Array.isArray(results) ? results : []).forEach(r => {
+    if (!(r && !r.error && r.series.t.length)) {
+      data.push(new Array(allT.length).fill(null));
+      bandByEntity.push(false);
+      entityMeta.push({ observed: new Array(allT.length).fill(null), gaps: [] });
+      return;
+    }
+    const s = r.series;
+    const gaps = r.gap_intervals || [];
+    const band = (r.algo === 'LTTB' || r.algo === 'MINMAXLTTB') && s.min !== undefined;
+    data.push(interpTo(allT, s.t, s.avg, rawMode, gaps));
+    if (band) {
+      data.push(interpTo(allT, s.min_t || s.t, s.min, rawMode, gaps));
+      data.push(interpTo(allT, s.max_t || s.t, s.max, rawMode, gaps));
+    }
+    bandByEntity.push(band);
+    entityMeta.push({
+      observed: alignExact(allT, s.t, s.avg),
+      quality: alignExact(allT, s.t, s.quality_flag || []),
+      sampleCount: alignExact(allT, s.t, s.sample_count || []),
+      gaps,
+      expectedStep: r.expected_step_seconds,
+      qualitySummary: r.quality_summary || {},
+      dataFidelity: r.data_fidelity || {},
+    });
+    agg.gapTotal += gaps.length;
+    agg.scanned  += r.rows_scanned;
+    agg.rawTotal += r.rows_raw;
+    agg.sent     += r.rows_returned;
+    agg.dbMs     = Math.max(agg.dbMs, r.query_ms);
+    agg.dsMs     = Math.max(agg.dsMs, r.ds_ms || 0);
+    agg.resName  = r.resolution;
+    agg.respAlgo = r.algo || "M4";
+    agg.hasData  = true;
+  });
+  return { data, bandByEntity, entityMeta, agg };
+}
+
+// Render the bottom stats bar (or a "no data" message) from the counters.
+function renderStatsBar(agg, results) {
+  if (!agg.hasData) { $("#stats").textContent = "no data in selected range"; return; }
+  const nFailed = selected.length - (Array.isArray(results)
+    ? results.filter(r => r && !r.error).length : 0);
+  const errHtml = nFailed
+    ? `<span class="stat-err"> ${nFailed} series failed</span>` : "";
+  const spanHours = ((view.t1 - view.t0) / 3600).toFixed(1);
+  const stats = [
+    ['series', selected.length],
+    ['range', `${spanHours}h`],
+    ['tier', agg.resName],
+    ['raw', agg.rawTotal.toLocaleString()],
+    ['db', agg.scanned.toLocaleString()],
+    ['out', agg.sent.toLocaleString()],
+    ['gaps', agg.gapTotal],
+    ['db', `${agg.dbMs}ms`],
+    [agg.respAlgo, `${agg.dsMs}ms`],
+  ];
+  $("#stats").innerHTML = stats
+    .map(([label, value]) =>
+      `<span class="stat-block"><span class="stat-label">${label}</span>${value}</span>`)
+    .join('') + errHtml;
+}
+
+// Show/refresh or hide the per-entity histogram panel.
+function renderHistogramPanel(hasData) {
+  const histWrap = document.getElementById('histwrap');
+  if (!showHist()) { histWrap.style.display = 'none'; return; }
+  histWrap.style.display = '';
+  if (hasData && lastRenderData) updateHistograms(selected, lastRenderData, histBinCount());
+  else clearHistograms();
 }
 
 // ── Main fetch ────────────────────────────────────────────────────────────────
@@ -313,112 +397,18 @@ async function fetchData() {
   if (myId !== requestSeq) return;
   stopStatusPoll();
 
-  // ── Build chart data ──────────────────────────────────────────────────────
-  const allT = buildSharedTimeAxis(results);
-
-  let scanned = 0;
-  let rawTotal = 0;
-  let sent = 0;
-  let gapTotal = 0;
-  let dbMs = 0;
-  let archMs = 0;
-  let dsMs = 0;
-  let resName = "raw";
-  let respAlgo = "M4";
-  let hasData = false;
-  const algoUI = $("#algo").value;
-  const data   = [allT];
-  const bandByEntity = [];
-  const entityMeta = [];
-
-  (Array.isArray(results) ? results : []).forEach(r => {
-    if (r && !r.error && r.series.t.length) {
-      const s    = r.series;
-      const gaps = r.gap_intervals || [];
-      gapTotal += gaps.length;
-      const rawMode = algoUI === 'RAW';
-      const band = (r.algo === 'LTTB' || r.algo === 'MINMAXLTTB') && s.min !== undefined;
-      const row  = [interpTo(allT, s.t, s.avg, rawMode, gaps)];
-      if (band) {
-        row.push(interpTo(allT, s.min_t || s.t, s.min, rawMode, gaps));
-        row.push(interpTo(allT, s.max_t || s.t, s.max, rawMode, gaps));
-      }
-      data.push(...row);
-      bandByEntity.push(band);
-      entityMeta.push({
-        observed: alignExact(allT, s.t, s.avg),
-        quality: alignExact(allT, s.t, s.quality_flag || []),
-        sampleCount: alignExact(allT, s.t, s.sample_count || []),
-        gaps,
-        expectedStep: r.expected_step_seconds,
-        qualitySummary: r.quality_summary || {},
-        dataFidelity: r.data_fidelity || {},
-      });
-      scanned  += r.rows_scanned;
-      rawTotal += r.rows_raw;
-      sent     += r.rows_returned;
-      dbMs     = Math.max(dbMs,   r.query_ms);
-      archMs   = Math.max(archMs, r.archive_ms || 0);
-      dsMs     = Math.max(dsMs,   r.ds_ms || 0);
-      resName  = r.resolution;
-      respAlgo = r.algo || "M4";
-      hasData  = true;
-    } else {
-      data.push(new Array(allT.length).fill(null));
-      bandByEntity.push(false);
-      entityMeta.push({ observed: new Array(allT.length).fill(null), gaps: [] });
-    }
-  });
-
-  // ── Render chart ──────────────────────────────────────────────────────────
-  if (hasData) {
-    chartUpdate(
-      data, selected, navTo,
-      $("#perAxis").checked, bandByEntity, entityMeta
-    );
+  // ── Build chart data + render chart ────────────────────────────────────────
+  const { data, bandByEntity, entityMeta, agg } =
+    buildChartData(results, $("#algo").value === 'RAW');
+  if (agg.hasData) {
+    chartUpdate(data, selected, navTo,
+      $("#perAxis").checked, bandByEntity, entityMeta);
     buildLegend(selected);
   }
 
-  // The primary evidence view is complete now. Do not leave the global
-  // status bar or histograms waiting on optional overlays.
-  const nFailed = selected.length - (Array.isArray(results)
-    ? results.filter(r => r && !r.error).length : 0);
-  const spanHours = ((view.t1 - view.t0) / 3600).toFixed(1);
-  const errHtml = nFailed
-    ? `<span class="stat-err"> ${nFailed} series failed</span>`
-    : "";
-
-  if (hasData) {
-    const stats = [
-      ['series', selected.length],
-      ['range', `${spanHours}h`],
-      ['tier', resName],
-      ['raw', rawTotal.toLocaleString()],
-      ['db', scanned.toLocaleString()],
-      ['out', sent.toLocaleString()],
-      ['gaps', gapTotal],
-      ['db', `${dbMs}ms`],
-      [respAlgo, `${dsMs}ms`],
-    ];
-    $("#stats").innerHTML = stats
-      .map(([label, value]) =>
-        `<span class="stat-block"><span class="stat-label">${label}</span>${value}</span>`)
-      .join('') + errHtml;
-  } else {
-    $("#stats").textContent = "no data in selected range";
-  }
-
-  const histWrap = document.getElementById('histwrap');
-  if (showHist()) {
-    histWrap.style.display = '';
-    if (hasData && lastRenderData) {
-      updateHistograms(selected, lastRenderData, histBinCount());
-    } else {
-      clearHistograms();
-    }
-  } else {
-    histWrap.style.display = 'none';
-  }
+  // The primary evidence view is complete now; overlays resolve independently.
+  renderStatsBar(agg, results);
+  renderHistogramPanel(agg.hasData);
 
   // ── Heatmap overlay ─────────────────────────────────────────────────────
   const hmWrap = document.getElementById('heatmapwrap');
@@ -464,7 +454,6 @@ $("#clearCache").onclick = async () => {
 function applyRange(t0, t1) {
   if (t0 === null || t1 === null || t1 <= t0) return;
   view       = { t0, t1 };
-  queryRange = { t0, t1 };
   clearZoom();
   if (navTimer) {
     clearTimeout(navTimer);

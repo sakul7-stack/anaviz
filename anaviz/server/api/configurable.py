@@ -18,7 +18,7 @@ import io
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
 import httpx
 import numpy as np
@@ -93,6 +93,30 @@ class RollupData:
                           max=e, max_t=e, last=e, last_t=e, n=n, q=q,
                           total=0, truncated=False)
 
+    @staticmethod
+    def from_db_rows(rows: list[tuple], *, truncated: bool = False) -> "RollupData":
+        """Build from rows in the shared bucket column layout:
+        (bucket_start, v_first, first_ts, v_min, min_ts, v_max, max_ts,
+         v_last, last_ts, v_avg, n, q_worst). Used by cache_rollup reads,
+        the SQL bucket aggregation, and the in-memory backfill — one layout,
+        one builder. ``t`` is each bucket's first-sample timestamp."""
+        if not rows:
+            return RollupData.empty()
+
+        def col(i: int, dtype=float) -> np.ndarray:
+            return np.array([r[i] for r in rows], dtype=dtype)
+
+        return RollupData(
+            t=col(2), avg=col(9),
+            first=col(1), first_t=col(2),
+            min=col(3), min_t=col(4),
+            max=col(5), max_t=col(6),
+            last=col(7), last_t=col(8),
+            n=col(10, np.int64), q=col(11, np.int16),
+            total=int(sum(r[10] for r in rows)),
+            truncated=truncated,
+        )
+
 
 def _iso(epoch: float) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).isoformat()
@@ -100,20 +124,7 @@ def _iso(epoch: float) -> str:
 
 def bucket_rows_to_arrays(rows: list[tuple]) -> RollupData | None:
     """Convert ``aggregate_buckets`` output for one level to ``RollupData``."""
-    if not rows:
-        return None
-    arr = np.asarray(rows, dtype=float)
-    return RollupData(
-        t=arr[:, 2], avg=arr[:, 9],
-        first=arr[:, 1], first_t=arr[:, 2],
-        min=arr[:, 3], min_t=arr[:, 4],
-        max=arr[:, 5], max_t=arr[:, 6],
-        last=arr[:, 7], last_t=arr[:, 8],
-        n=arr[:, 10].astype(np.int64),
-        q=arr[:, 11].astype(np.int16),
-        total=int(arr[:, 10].sum()),
-        truncated=False,
-    )
+    return RollupData.from_db_rows(rows) if rows else None
 
 
 # ── JSON-path helper ──────────────────────────────────────────────────────────
@@ -233,6 +244,17 @@ def _quality_flag(raw, quality_map: dict[str, str] | None) -> int:
         if canonical is not None:
             return coerce_quality(canonical)
     return coerce_quality(raw)
+
+
+def _quality_summary(q: np.ndarray) -> dict[str, int]:
+    """Count cached samples per quality flag, keyed by the flag as a string."""
+    return {str(int(flag)): int(np.count_nonzero(q == flag))
+            for flag in np.unique(q)}
+
+
+def _r6(arr) -> list:
+    """Round a numeric array to 6 dp and return a plain list for the JSON API."""
+    return np.round(arr, 6).tolist()
 
 
 # ── Generic fixed-schema cache ────────────────────────────────────────────────
@@ -478,24 +500,7 @@ class GenericDatasetCache:
                 (self.dataset_key, entity_id, measure_id, bucket_s,
                  lo, end, cap))
             rows = await cur.fetchall()
-        if not rows:
-            return RollupData.empty()
-        return RollupData(
-            t=np.array([r[2] for r in rows], dtype=float),
-            avg=np.array([r[9] for r in rows], dtype=float),
-            first=np.array([r[1] for r in rows], dtype=float),
-            first_t=np.array([r[2] for r in rows], dtype=float),
-            min=np.array([r[3] for r in rows], dtype=float),
-            min_t=np.array([r[4] for r in rows], dtype=float),
-            max=np.array([r[5] for r in rows], dtype=float),
-            max_t=np.array([r[6] for r in rows], dtype=float),
-            last=np.array([r[7] for r in rows], dtype=float),
-            last_t=np.array([r[8] for r in rows], dtype=float),
-            n=np.array([r[10] for r in rows], dtype=np.int64),
-            q=np.array([r[11] for r in rows], dtype=np.int16),
-            total=int(sum(r[10] for r in rows)),
-            truncated=False,
-        )
+        return RollupData.from_db_rows(rows)
 
     async def count(
         self, entity_id: str, measure_id: str, start: datetime, end: datetime,
@@ -545,24 +550,7 @@ class GenericDatasetCache:
                 (bucket, bucket, self.dataset_key, entity_id, measure_id,
                  start, end, cap))
             rows = await cur.fetchall()
-        if not rows:
-            return RollupData.empty()
-        return RollupData(
-            t=np.array([r[2] for r in rows], dtype=float),
-            avg=np.array([r[9] for r in rows], dtype=float),
-            first=np.array([r[1] for r in rows], dtype=float),
-            first_t=np.array([r[2] for r in rows], dtype=float),
-            min=np.array([r[3] for r in rows], dtype=float),
-            min_t=np.array([r[4] for r in rows], dtype=float),
-            max=np.array([r[5] for r in rows], dtype=float),
-            max_t=np.array([r[6] for r in rows], dtype=float),
-            last=np.array([r[7] for r in rows], dtype=float),
-            last_t=np.array([r[8] for r in rows], dtype=float),
-            n=np.array([r[10] for r in rows], dtype=np.int64),
-            q=np.array([r[11] for r in rows], dtype=np.int16),
-            total=int(sum(r[10] for r in rows)),
-            truncated=len(rows) >= cap,
-        )
+        return RollupData.from_db_rows(rows, truncated=len(rows) >= cap)
 
     async def read(
         self, entity_id: str, measure_id: str, start: datetime, end: datetime,
@@ -618,7 +606,6 @@ class ConfigurableHttpAdapter(DatasetAdapter):
         cache: GenericDatasetCache,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
-        source: Callable[..., httpx.AsyncClient] | None = None,
     ) -> None:
         self.config = config
         self.cache = cache
@@ -920,6 +907,21 @@ class ConfigurableHttpAdapter(DatasetAdapter):
             ),
         )
 
+    def _fidelity(self, *, tier: str, aggregated: bool, truncated: bool,
+                  **extra) -> dict:
+        """Provenance/fidelity metadata attached to every series. Extra keys
+        (e.g. bucket_seconds, query_aggregated) are merged in for bucket tiers."""
+        return {
+            "source": "config_http_cache",
+            "tier": tier,
+            "aggregated": aggregated,
+            "interpolated": False,
+            "missing_intervals_preserved": True,
+            "truncated": truncated,
+            "cache_namespace": self.dataset_key,
+            **extra,
+        }
+
     async def _raw_series(
         self, entity_id: str, measure_id: str, spec, start: datetime,
         end: datetime, budget: int, algo: str, source_ms: float,
@@ -963,10 +965,7 @@ class ConfigurableHttpAdapter(DatasetAdapter):
         if expected_step is None:
             expected_step = self._inferred_step
         gaps = find_gap_intervals(t, expected_step)
-        quality_summary = {
-            str(int(flag)): int(np.count_nonzero(q == flag))
-            for flag in np.unique(q)
-        }
+        quality_summary = _quality_summary(q)
         payload = {
             "t": t,
             "avg": v,
@@ -974,10 +973,10 @@ class ConfigurableHttpAdapter(DatasetAdapter):
             "quality_flag": q,
         }
         sampled, ds_ms = downsample(payload, algo, budget)
-        out_t = np.round(sampled["t"], 6).tolist()
+        out_t = _r6(sampled["t"])
         points = SeriesPoints(
             t=out_t,
-            value=np.round(sampled["avg"], 6).tolist(),
+            value=_r6(sampled["avg"]),
             quality=[int(x) for x in sampled["quality_flag"]],
             sample_count=[int(x) for x in sampled["sample_count"]],
         )
@@ -991,15 +990,8 @@ class ConfigurableHttpAdapter(DatasetAdapter):
             expected_step_seconds=expected_step,
             gaps=gaps,
             quality_summary=quality_summary,
-            fidelity={
-                "source": "config_http_cache",
-                "tier": "raw",
-                "aggregated": False,
-                "interpolated": False,
-                "missing_intervals_preserved": True,
-                "truncated": truncated,
-                "cache_namespace": self.dataset_key,
-            },
+            fidelity=self._fidelity(tier="raw", aggregated=False,
+                                    truncated=truncated),
             metrics=QueryMetrics(
                 rows_source=total,
                 rows_scanned=len(t),
@@ -1021,10 +1013,7 @@ class ConfigurableHttpAdapter(DatasetAdapter):
         ``query_aggregated`` marks on-the-fly SQL bucketing (dense raw ranges)
         vs a stored ``cache_rollup`` tier."""
         gaps = find_gap_intervals(data.t, bucket_s)
-        quality_summary = {
-            str(int(flag)): int(np.count_nonzero(data.q == flag))
-            for flag in np.unique(data.q)
-        }
+        quality_summary = _quality_summary(data.q)
         payload = {
             "t": data.t,
             "avg": data.avg,
@@ -1040,18 +1029,18 @@ class ConfigurableHttpAdapter(DatasetAdapter):
             "quality_flag": data.q,
         }
         sampled, ds_ms = downsample(payload, algo, budget)
-        out_t = np.round(sampled["t"], 6).tolist()
+        out_t = _r6(sampled["t"])
         points = SeriesPoints(
             t=out_t,
-            value=np.round(sampled["avg"], 6).tolist(),
-            min=np.round(sampled["min"], 6).tolist(),
-            max=np.round(sampled["max"], 6).tolist(),
-            first=np.round(sampled["first"], 6).tolist(),
-            last=np.round(sampled["last"], 6).tolist(),
-            min_t=np.round(sampled["min_t"], 6).tolist(),
-            max_t=np.round(sampled["max_t"], 6).tolist(),
-            first_t=np.round(sampled["first_t"], 6).tolist(),
-            last_t=np.round(sampled["last_t"], 6).tolist(),
+            value=_r6(sampled["avg"]),
+            min=_r6(sampled["min"]),
+            max=_r6(sampled["max"]),
+            first=_r6(sampled["first"]),
+            last=_r6(sampled["last"]),
+            min_t=_r6(sampled["min_t"]),
+            max_t=_r6(sampled["max_t"]),
+            first_t=_r6(sampled["first_t"]),
+            last_t=_r6(sampled["last_t"]),
             quality=[int(x) for x in sampled["quality_flag"]],
             sample_count=[int(x) for x in sampled["sample_count"]],
         )
@@ -1069,17 +1058,9 @@ class ConfigurableHttpAdapter(DatasetAdapter):
             expected_step_seconds=bucket_s,
             gaps=gaps,
             quality_summary=quality_summary,
-            fidelity={
-                "source": "config_http_cache",
-                "tier": tier_name(bucket_s),
-                "bucket_seconds": bucket_s,
-                "aggregated": True,
-                "query_aggregated": query_aggregated,
-                "interpolated": False,
-                "missing_intervals_preserved": True,
-                "truncated": truncated,
-                "cache_namespace": self.dataset_key,
-            },
+            fidelity=self._fidelity(
+                tier=tier_name(bucket_s), aggregated=True, truncated=truncated,
+                bucket_seconds=bucket_s, query_aggregated=query_aggregated),
             metrics=QueryMetrics(
                 rows_source=rows_source,
                 rows_scanned=len(data.t),
@@ -1169,15 +1150,9 @@ class ConfigurableHttpAdapter(DatasetAdapter):
             unit=spec.unit,
             resolution=resolution,
             gaps=[],
-            fidelity={
-                "source": "config_http_cache",
-                "tier": resolution,
-                "aggregated": resolution != "raw",
-                "interpolated": False,
-                "missing_intervals_preserved": True,
-                "truncated": truncated,
-                "cache_namespace": self.dataset_key,
-            },
+            fidelity=self._fidelity(tier=resolution,
+                                    aggregated=resolution != "raw",
+                                    truncated=truncated),
             metrics=QueryMetrics(
                 rows_source=0,
                 rows_scanned=0,
