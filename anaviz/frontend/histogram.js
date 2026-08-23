@@ -1,326 +1,369 @@
 /**
- * histogram.js — per-entity value-distribution (histogram) panel.
+ * histogram.js — Per-entity value distribution (histogram) panel.
  *
- * One histogram per selected entity (≤ MAX_SERIES), rendered below the
- * heatmap. Each is a small canvas with a drag handle so heights are
- * adjustable independently (persisted in localStorage per entity).
+ * One histogram per selected entity, rendered below the heatmap.
+ * Bins are built from the SAME interpolated data the chart draws,
+ * so histograms always reflect the visible range.
  *
- * Sync: bins are built from the SAME interpolated series the main chart
- * draws (lastRenderData), so the histogram always reflects the visible
- * range. Chart/heatmap hover marks the hovered value on each histogram
- * (via setHistogramHover), and the chart tooltip is enriched with the bin
- * a hovered value falls into (via binInfoLine).
+ * Features:
+ *  - Drag handle to resize individual histograms (persisted in localStorage)
+ *  - Chart/heatmap hover marks the hovered value on each histogram
+ *  - Chart tooltip enriched with which bin a hovered value falls into
  */
+import { $, COLORS, MAX_SERIES } from "./utils.js";
+import { getValuesAtTime } from "./chart.js";
 
-import { $, COLORS, MAX_SERIES } from './utils.js';
-import { getValuesAtTime } from './chart.js';
+// ── Constants ────────────────────────────────────────────────────────────
 
-const DEFAULT_H = 72;
-const MIN_H     = 36;
-const MAX_H     = 260;
-const LABEL_H   = 16;    // strip at the bottom of each canvas for value ticks
+const DEFAULT_HEIGHT = 72;
+const MIN_HEIGHT = 36;
+const MAX_HEIGHT = 260;
+const LABEL_HEIGHT = 16;  // bottom strip for value ticks
 
-let _rows  = [];          // { eid, idx, name, color, base, bins, canvas }
-let _lastRenderData = null;
-let _binCount = 24;
-let _hover = { t: null, values: null };
+// ── State ────────────────────────────────────────────────────────────────
+
+let rows = [];              // [{ entity, canvas, bins, ... }]
+let lastRenderData = null;
+let binCount = 24;
+let hoverState = { time: null, values: null };
+
+// ── Public API ───────────────────────────────────────────────────────────
 
 /**
- * Rebuild / refresh the histogram rows from the current chart data.
- * @param {Array} selected       entity objects (app state, full list)
- * @param {Object} lastRenderData  chart.js lastRenderData (data, selected, bandByEntity)
+ * Rebuild or refresh histograms from the current chart data.
  */
-export function updateHistograms(selected, lastRenderData, binCount = 24) {
-  _lastRenderData = lastRenderData;
-  _binCount = Math.min(100, Math.max(4, Math.round(Number(binCount) || 24)));
-  const wrap = document.getElementById('hists');
+export function updateHistograms(selected, renderData, count = 24) {
+  lastRenderData = renderData;
+  binCount = Math.min(100, Math.max(4, Math.round(Number(count) || 24)));
+
+  const wrap = document.getElementById("hists");
   if (!wrap) return;
 
-  const sel = (selected || []).slice(0, MAX_SERIES);
-  const eids = sel.map(c => c.entity_id).join(',');
-  if (wrap.dataset.eids !== eids) {
-    wrap.innerHTML = '';
-    wrap.dataset.eids = eids;
-    _rows = sel.map((c, i) => _buildRow(wrap, c, i));
+  const entities = (selected || []).slice(0, MAX_SERIES);
+  const entityIds = entities.map((e) => e.entity_id).join(",");
+
+  // Rebuild DOM if the entity list changed
+  if (wrap.dataset.eids !== entityIds) {
+    wrap.innerHTML = "";
+    wrap.dataset.eids = entityIds;
+    rows = entities.map((entity, i) => buildRow(wrap, entity, i));
   }
 
-  // Row base index into lastRenderData.data for each entity's avg series
+  // Set base indices and compute bins for each entity
   let base = 1;
-  _rows.forEach((row, i) => {
-    const stride = lastRenderData.bandByEntity?.[i] ? 3 : 1;
+  rows.forEach((row, i) => {
     row.base = base;
-    base += stride;
+    base += renderData.bandByEntity?.[i] ? 3 : 1;
+
+    const observedValues = renderData.entityMeta?.[i]?.observed;
+    const dataRow = renderData.data?.[row.base];
+    const values = (observedValues || dataRow || [])
+      .filter((v) => v != null && isFinite(v));
+
+    row.bins = makeBins(values, binCount);
   });
 
-  // Use exact served nodes for the distribution. Interpolated display values
-  // are useful for a line but must not be counted as observations.
-  _rows.forEach((row, i) => {
-    const dataRow = lastRenderData.data?.[row.base];
-    const observed = lastRenderData.entityMeta?.[i]?.observed;
-    const vals = (observed || dataRow || [])
-      .filter(v => v !== null && v !== undefined && isFinite(v));
-    row.bins = _makeBins(vals, _binCount);
-  });
-
-  _drawAll();
+  rows.forEach((row) => drawHistogram(row));
 }
 
-/** Remove all histograms (e.g. no data in range). */
+/** Remove all histograms. */
 export function clearHistograms() {
-  const wrap = document.getElementById('hists');
-  if (wrap) { wrap.innerHTML = ''; wrap.dataset.eids = ''; }
-  _rows = [];
-  _hover = { t: null, values: null };
+  const wrap = document.getElementById("hists");
+  if (wrap) {
+    wrap.innerHTML = "";
+    wrap.dataset.eids = "";
+  }
+  rows = [];
+  hoverState = { time: null, values: null };
 }
 
-function _buildRow(wrap, c, i) {
-  const row = document.createElement('div');
-  row.className = 'hist-row';
+/** Mark the hovered time on every histogram (vertical value marker). */
+export function setHistogramHover(time) {
+  hoverState.time = time;
 
-  const head = document.createElement('div');
-  head.className = 'hist-head';
-  const sw = document.createElement('span');
-  sw.className = 'legend-swatch';
-  sw.style.background = COLORS[i % COLORS.length];
-  const name = document.createElement('span');
-  name.textContent = c.label || c.name;
-  name.title = c.name;
-  head.appendChild(sw);
-  head.appendChild(name);
+  if (time == null) {
+    hoverState.values = null;
+    rows.forEach((row) => drawHistogram(row));
+    return;
+  }
 
-  const canvas = document.createElement('canvas');
-  canvas.className = 'hist-canvas';
+  hoverState.values = lastRenderData
+    ? getValuesAtTime(time)?.values || null
+    : null;
 
-  const saved = Number(localStorage.getItem(`histH_${c.entity_id}`));
-  canvas.style.height = (saved >= MIN_H ? Math.min(saved, MAX_H) : DEFAULT_H) + 'px';
+  rows.forEach((row) => drawHistogram(row));
+}
 
-  const resizer = document.createElement('div');
-  resizer.className = 'hist-resizer';
-  resizer.title = 'Drag to resize histogram · double-click to auto-size';
+/** Clear hover markers + tooltip. */
+export function clearHistogramHover() {
+  hoverState = { time: null, values: null };
+  rows.forEach((row) => { row.hoveredBin = -1; drawHistogram(row); });
+  const tip = $("#hist-tooltip");
+  if (tip) tip.style.display = "none";
+}
 
-  row.appendChild(head);
-  row.appendChild(canvas);
-  row.appendChild(resizer);
-  wrap.appendChild(row);
+/**
+ * Extra tooltip line for the chart: which bin a hovered value falls into.
+ */
+export function binInfoLine(entityIndex, value) {
+  const row = rows[entityIndex];
+  if (!row?.bins || value == null || !isFinite(value)) return "";
 
+  const { edges, counts } = row.bins;
+  const binIndex = findBinIndex(edges, value);
+  const pct = Math.round((counts[binIndex] / row.bins.total) * 1000) / 10;
+
+  return `
+    <div class="tt-row">
+      <span class="tt-swatch" style="background:${row.color}"></span>
+      <span class="tt-name">${formatValue(edges[binIndex])} – ${formatValue(edges[binIndex + 1])}</span>
+      <span class="tt-val">${counts[binIndex]} pts</span>
+    </div>`;
+}
+
+// ── Build a histogram row ────────────────────────────────────────────────
+
+function buildRow(wrap, entity, index) {
+  // Create DOM structure
+  const rowEl = document.createElement("div");
+  rowEl.className = "hist-row";
+
+  const header = document.createElement("div");
+  header.className = "hist-head";
+
+  const swatch = document.createElement("span");
+  swatch.className = "legend-swatch";
+  swatch.style.background = COLORS[index % COLORS.length];
+
+  const nameEl = document.createElement("span");
+  nameEl.textContent = entity.label || entity.name;
+  header.append(swatch, nameEl);
+
+  const canvasEl = document.createElement("canvas");
+  canvasEl.className = "hist-canvas";
+
+  // Restore saved height
+  const saved = Number(localStorage.getItem(`histH_${entity.entity_id}`));
+  canvasEl.style.height =
+    (saved >= MIN_HEIGHT ? Math.min(saved, MAX_HEIGHT) : DEFAULT_HEIGHT) + "px";
+
+  const resizer = document.createElement("div");
+  resizer.className = "hist-resizer";
+
+  rowEl.append(header, canvasEl, resizer);
+  wrap.appendChild(rowEl);
+
+  // Create entry object
   const entry = {
-    eid: c.entity_id, idx: i, name: c.label || c.name,
-    color: COLORS[i % COLORS.length], base: 1, bins: null, canvas,
-    binHover: -1,
+    entityId: entity.entity_id,
+    index,
+    name: entity.label || entity.name,
+    color: COLORS[index % COLORS.length],
+    base: 1,
+    bins: null,
+    canvas: canvasEl,
+    hoveredBin: -1,
   };
 
-  // Per-histogram drag resize
-  resizer.addEventListener('mousedown', e => {
+  // Drag to resize
+  resizer.addEventListener("mousedown", (e) => {
     e.preventDefault();
-    resizer.classList.add('active');
+    resizer.classList.add("active");
+
     const startY = e.clientY;
-    const startH = canvas.getBoundingClientRect().height;
-    const onMove = ev => {
-      const h = Math.min(Math.max(startH + (startY - ev.clientY), MIN_H), MAX_H);
-      canvas.style.height = h + 'px';
-      localStorage.setItem(`histH_${entry.eid}`, String(Math.round(h)));
-      _drawOne(entry);
+    const startHeight = canvasEl.getBoundingClientRect().height;
+
+    const onMouseMove = (ev) => {
+      const newHeight = Math.min(
+        Math.max(startHeight + (startY - ev.clientY), MIN_HEIGHT),
+        MAX_HEIGHT
+      );
+      canvasEl.style.height = newHeight + "px";
+      localStorage.setItem(`histH_${entry.entityId}`, String(Math.round(newHeight)));
+      drawHistogram(entry);
     };
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup',   onUp);
-      resizer.classList.remove('active');
+
+    const onMouseUp = () => {
+      removeEventListener("mousemove", onMouseMove);
+      removeEventListener("mouseup", onMouseUp);
+      resizer.classList.remove("active");
     };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup',   onUp);
+
+    addEventListener("mousemove", onMouseMove);
+    addEventListener("mouseup", onMouseUp);
   });
-  resizer.addEventListener('dblclick', () => {
-    localStorage.removeItem(`histH_${entry.eid}`);
-    canvas.style.height = DEFAULT_H + 'px';
-    _drawOne(entry);
+
+  // Double-click to reset height
+  resizer.addEventListener("dblclick", () => {
+    localStorage.removeItem(`histH_${entry.entityId}`);
+    canvasEl.style.height = DEFAULT_HEIGHT + "px";
+    drawHistogram(entry);
   });
 
   // Bin hover tooltip
-  canvas.addEventListener('mousemove', e => _onHistMove(entry, e));
-  canvas.addEventListener('mouseleave', () => _hideHistTooltip());
+  canvasEl.addEventListener("mousemove", (e) => handleBinHover(entry, e));
+  canvasEl.addEventListener("mouseleave", () => {
+    entry.hoveredBin = -1;
+    drawHistogram(entry);
+    const tip = $("#hist-tooltip");
+    if (tip) tip.style.display = "none";
+  });
 
   return entry;
 }
 
-function _makeBins(vals, requestedBins = 24) {
-  const n = vals.length;
+// ── Bin computation ──────────────────────────────────────────────────────
+
+function makeBins(values, nBins = 24) {
+  const n = values.length;
   if (!n) return null;
-  let lo = Infinity, hi = -Infinity;
-  for (let i = 0; i < n; i++) {
-    if (vals[i] < lo) lo = vals[i];
-    if (vals[i] > hi) hi = vals[i];
+
+  // Find range
+  let min = Infinity, max = -Infinity;
+  for (const v of values) {
+    if (v < min) min = v;
+    if (v > max) max = v;
   }
-  if (hi === lo) { hi = lo + 1; lo = lo - 1; }   // single value → one bin
-  const nBins = Math.min(100, Math.max(4, Math.round(Number(requestedBins) || 24)));
-  const bw = (hi - lo) / nBins;
+
+  // Handle single value
+  if (max === min) { max = min + 1; min = min - 1; }
+
+  // Build bins
+  const binWidth = (max - min) / nBins;
   const counts = new Array(nBins).fill(0);
-  for (let i = 0; i < n; i++) {
-    let b = Math.floor((vals[i] - lo) / bw);
-    if (b >= nBins) b = nBins - 1;
-    counts[b]++;
+  for (const v of values) {
+    let bin = Math.floor((v - min) / binWidth);
+    if (bin >= nBins) bin = nBins - 1;
+    counts[bin]++;
   }
-  const edges = new Array(nBins + 1);
-  for (let i = 0; i <= nBins; i++) edges[i] = lo + i * bw;
-  return { edges, counts, lo, hi, n: nBins, total: n };
+
+  const edges = Array.from({ length: nBins + 1 }, (_, i) => min + i * binWidth);
+
+  return { edges, counts, min, max, nBins, total: n };
 }
 
-function _fmt(v) {
-  if (v === null || v === undefined || !isFinite(v)) return '-';
-  return String(Math.round(v * 1e4) / 1e4);
+function findBinIndex(edges, value) {
+  for (let i = 0; i < edges.length - 1; i++) {
+    if (value >= edges[i] && value < edges[i + 1]) return i;
+  }
+  // Past the last edge
+  return value >= edges[edges.length - 1] ? edges.length - 2 : 0;
 }
 
-function _valToX(bins, v) {
-  if (!bins || bins.hi <= bins.lo) return 0;
-  return ((v - bins.lo) / (bins.hi - bins.lo)) * 100;   // % of width
-}
+// ── Drawing ──────────────────────────────────────────────────────────────
 
-function _drawAll() {
-  _rows.forEach(r => _drawOne(r));
-}
-
-function _drawOne(row) {
-  const cv  = row.canvas;
+function drawHistogram(row) {
+  const cv = row.canvas;
   if (!cv) return;
-  const cssW = cv.parentElement.clientWidth || 400;
-  const cssH = cv.offsetHeight || DEFAULT_H;
-  if (cv.width !== cssW) cv.width = cssW;
-  if (cv.height !== cssH) cv.height = cssH;
-  const ctx = cv.getContext('2d');
-  ctx.clearRect(0, 0, cssW, cssH);
+
+  const cssWidth = cv.parentElement.clientWidth || 400;
+  const cssHeight = cv.offsetHeight || DEFAULT_HEIGHT;
+  if (cv.width !== cssWidth) cv.width = cssWidth;
+  if (cv.height !== cssHeight) cv.height = cssHeight;
+
+  const ctx = cv.getContext("2d");
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
 
   const bins = row.bins;
-  const barH = cssH - LABEL_H;
+  const barHeight = cssHeight - LABEL_HEIGHT;
+
+  // No data message
   if (!bins) {
-    ctx.fillStyle = '#6c757d';
-    ctx.font = '11px system-ui';
-    ctx.fillText('no data in range', 8, barH / 2 + 4);
+    ctx.fillStyle = "#6c757d";
+    ctx.font = "11px system-ui";
+    ctx.fillText("no data", 8, barHeight / 2 + 4);
     return;
   }
 
-  const maxC = Math.max(1, ...bins.counts);
-  const bwPct = 100 / bins.n;
+  // Draw bars
+  const maxCount = Math.max(1, ...bins.counts);
+  const binWidthPct = 100 / bins.nBins;
 
-  for (let b = 0; b < bins.n; b++) {
-    const h  = Math.max(1, Math.round((bins.counts[b] / maxC) * (barH - 6)));
-    const x  = (bwPct * b) / 100 * cssW;
-    const w  = Math.max(1, (bwPct / 100) * cssW - 1);
+  for (let i = 0; i < bins.nBins; i++) {
+    const height = Math.max(1, Math.round((bins.counts[i] / maxCount) * (barHeight - 6)));
+    const x = (binWidthPct * i) / 100 * cssWidth;
+    const width = Math.max(1, (binWidthPct / 100) * cssWidth - 1);
+
     ctx.fillStyle = row.color;
-    ctx.globalAlpha = 0.45 + 0.55 * (bins.counts[b] / maxC);
-    ctx.fillRect(Math.round(x), barH - h, Math.ceil(w), h);
+    ctx.globalAlpha = 0.45 + 0.55 * (bins.counts[i] / maxCount);
+    ctx.fillRect(Math.round(x), barHeight - height, Math.ceil(width), height);
   }
   ctx.globalAlpha = 1;
 
-  // value ticks
-  ctx.fillStyle = '#6c757d';
-  ctx.font = '10px system-ui';
-  ctx.textBaseline = 'top';
-  ctx.fillText(_fmt(bins.lo), 2, barH + 3);
-  const mid = _fmt((bins.lo + bins.hi) / 2);
-  ctx.textAlign = 'center';
-  ctx.fillText(mid, cssW / 2, barH + 3);
-  ctx.textAlign = 'right';
-  ctx.fillText(_fmt(bins.hi), cssW - 2, barH + 3);
-  ctx.textAlign = 'left';
+  // Draw value ticks at bottom
+  ctx.fillStyle = "#6c757d";
+  ctx.font = "10px system-ui";
+  ctx.textBaseline = "top";
+  ctx.fillText(formatValue(bins.min), 2, barHeight + 3);
+  ctx.textAlign = "center";
+  ctx.fillText(formatValue((bins.min + bins.max) / 2), cssWidth / 2, barHeight + 3);
+  ctx.textAlign = "right";
+  ctx.fillText(formatValue(bins.max), cssWidth - 2, barHeight + 3);
+  ctx.textAlign = "left";
 
-  // hovered-value marker (from chart / heatmap hover)
-  const v = _hover.values?.[row.idx];
-  if (v !== null && v !== undefined && isFinite(v)) {
-    const x = (_valToX(bins, v) / 100) * cssW;
-    ctx.strokeStyle = '#111';
+  // Draw hovered-value marker (from chart/heatmap hover)
+  const hoveredValue = hoverState.values?.[row.index];
+  if (hoveredValue != null && isFinite(hoveredValue)) {
+    const xPos = ((hoveredValue - bins.min) / (bins.max - bins.min)) * cssWidth;
+
+    ctx.strokeStyle = "#111";
     ctx.lineWidth = 1;
     ctx.setLineDash([3, 3]);
     ctx.beginPath();
-    ctx.moveTo(Math.round(x) + 0.5, 2);
-    ctx.lineTo(Math.round(x) + 0.5, barH);
+    ctx.moveTo(Math.round(xPos) + 0.5, 2);
+    ctx.lineTo(Math.round(xPos) + 0.5, barHeight);
     ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle = '#111';
+
+    ctx.fillStyle = "#111";
     ctx.beginPath();
-    ctx.arc(Math.round(x), barH, 3.5, 0, Math.PI * 2);
+    ctx.arc(Math.round(xPos), barHeight, 3.5, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // hovered bin highlight
-  if (row.binHover >= 0) {
-    const x  = (bwPct * row.binHover) / 100 * cssW;
-    const w  = Math.max(1, (bwPct / 100) * cssW - 1);
-    ctx.strokeStyle = '#111';
+  // Draw hovered bin highlight
+  if (row.hoveredBin >= 0) {
+    const x = (binWidthPct * row.hoveredBin) / 100 * cssWidth;
+    const w = Math.max(1, (binWidthPct / 100) * cssWidth - 1);
+    ctx.strokeStyle = "#111";
     ctx.lineWidth = 1;
-    ctx.strokeRect(Math.round(x) + 0.5, 1, Math.ceil(w) - 1, barH - 2);
+    ctx.strokeRect(Math.round(x) + 0.5, 1, Math.ceil(w) - 1, barHeight - 2);
   }
 }
 
-function _onHistMove(row, e) {
-  const cv = row.canvas;
-  const rect = cv.getBoundingClientRect();
-  const xPct = (e.clientX - rect.left) / rect.width;
+// ── Bin hover ────────────────────────────────────────────────────────────
+
+function handleBinHover(row, e) {
   const bins = row.bins;
   if (!bins) return;
-  let b = Math.floor(xPct * bins.n);
-  if (b >= bins.n) b = bins.n - 1;
-  if (b < 0) b = 0;
-  row.binHover = b;
-  _drawOne(row);
 
-  const tip = $('#hist-tooltip');
+  const rect = row.canvas.getBoundingClientRect();
+  const fraction = (e.clientX - rect.left) / rect.width;
+  const binIndex = Math.max(0, Math.min(bins.nBins - 1, Math.floor(fraction * bins.nBins)));
+
+  row.hoveredBin = binIndex;
+  drawHistogram(row);
+
+  // Show tooltip
+  const tip = $("#hist-tooltip");
   if (!tip) return;
-  const lo = bins.edges[b], hi = bins.edges[b + 1];
-  const pct = Math.round((bins.counts[b] / bins.total) * 1000) / 10;
-  tip.innerHTML =
-    `<b>${row.name}</b> · value ${_fmt(lo)} – ${_fmt(hi)}<br>` +
-    `count <b>${bins.counts[b]}</b> (${pct}%)`;
-  tip.style.display = 'block';
-  tip.style.left = Math.min(window.innerWidth  - 260, e.clientX + 14) + 'px';
-  tip.style.top  = Math.min(window.innerHeight - 80,  e.clientY + 14) + 'px';
+
+  const lo = bins.edges[binIndex];
+  const hi = bins.edges[binIndex + 1];
+  const count = bins.counts[binIndex];
+  const pct = Math.round((count / bins.total) * 1000) / 10;
+
+  tip.innerHTML = `
+    <b>${row.name}</b> · ${formatValue(lo)} – ${formatValue(hi)}<br>
+    count <b>${count}</b> (${pct}%)`;
+  tip.style.display = "block";
+  tip.style.left = Math.min(innerWidth - 260, e.clientX + 14) + "px";
+  tip.style.top = Math.min(innerHeight - 80, e.clientY + 14) + "px";
 }
 
-function _hideHistTooltip() {
-  _rows.forEach(r => r.binHover = -1);
-  const tip = $('#hist-tooltip');
-  if (tip) tip.style.display = 'none';
-  _drawAll();
-}
+// ── Helpers ──────────────────────────────────────────────────────────────
 
-/**
- * Mark the hovered time on every histogram (vertical value marker).
- * Called from the chart AND heatmap hover sync. Pass null to clear.
- */
-export function setHistogramHover(t) {
-  _hover.t = t;
-  if (t == null) {
-    _hover.values = null;
-    _drawAll();
-    return;
-  }
-  const got = _lastRenderData ? getValuesAtTime(t) : null;
-  _hover.values = got ? got.values : null;
-  _drawAll();
-}
-
-/** Clear markers + tooltip (chart mouseleave). */
-export function clearHistogramHover() {
-  _hover = { t: null, values: null };
-  _rows.forEach(r => r.binHover = -1);
-  _hideHistTooltip();
-}
-
-/**
- * Extra tooltip line for the chart tooltip: which bin a hovered value falls
- * into for that entity. Returns '' when histograms are hidden/no bins.
- */
-export function binInfoLine(entityIndex, value) {
-  const row = _rows[entityIndex];
-  if (!row?.bins || value === null || value === undefined || !isFinite(value)) return '';
-  const { edges, counts, lo, hi } = row.bins;
-  let b = -1;
-  for (let i = 0; i < edges.length - 1; i++) {
-    if (value >= edges[i] && value < edges[i + 1]) { b = i; break; }
-  }
-  if (b < 0) b = value >= hi ? edges.length - 2 : 0;
-  const pct = Math.round((counts[b] / row.bins.total) * 1000) / 10;
-  return `<div class="tt-row">
-    <span class="tt-swatch" style="background:${row.color}"></span>
-    <span class="tt-name">bin ${_fmt(edges[b])} – ${_fmt(edges[b + 1])}</span>
-    <span class="tt-val">${counts[b]} pts</span>
-  </div>`;
+function formatValue(v) {
+  if (v == null || !isFinite(v)) return "-";
+  return String(Math.round(v * 1e4) / 1e4);
 }

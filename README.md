@@ -175,7 +175,29 @@ The project exposes a canonical contract (`server/api/contracts.py`):
 `SeriesQueryResponse` move opaque IDs, time ranges, pixel budgets, values,
 envelopes, quality, gaps, fidelity, and provenance — never a database schema.
 The only source-specific knowledge lives in a `config.json` +
-`ConfigurableHttpAdapter` (`server/api/configurable.py`).
+`ConfigurableAdapter` (`server/adapter/adapter.py`).
+
+## Server structure
+
+```
+server/
+├── api/                    Routes and models
+│   ├── app.py                FastAPI routes + startup
+│   ├── config.py             config.json validation (Pydantic)
+│   └── contracts.py          Canonical Pydantic models
+├── adapter/                Data logic (HTTP + cache)
+│   ├── adapter.py            HTTP client, describe, entities, extent
+│   ├── cache.py              Postgres cache (read/write/delete)
+│   ├── query.py              Series + matrix query execution
+│   ├── common.py             Pure helpers (drain, spawn, parse_ts)
+│   ├── sql/
+│   │   ├── schema.sql        DDL for cache tables
+│   │   └── queries.py        Named SQL constants
+│   └── downsample/           M4, LTTB, MinMaxLTTB, rollup
+├── config.py               Settings (env vars)
+├── app.py                  Entry point (uvicorn)
+└── __main__.py             CLI (python -m server serve)
+```
 
 ## Config
 

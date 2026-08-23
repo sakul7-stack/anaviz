@@ -1,254 +1,285 @@
 /**
- * app.js — dataset discovery, application state, canonical API calls,
- *          and coordination between visualization panels.
+ * app.js — Main application coordinator.
+ *
+ * Responsibilities:
+ *  - Dataset discovery and loading
+ *  - Entity selection
+ *  - Date range navigation
+ *  - Data fetching and transformation
+ *  - Panel coordination (chart, heatmap, histogram)
+ *  - Event handlers for UI controls
  */
 import {
-  $, COLORS, MAX_SERIES, px, toLocalISO, parseLocalISO, api, apiPost,
-  seriesResponseToRenderer,
-  matrixResponseToHeatmap, buildSharedTimeAxis, interpTo, alignExact,
-} from './utils.js';
+  $, COLORS, MAX_SERIES, chartPixelWidth,
+  toLocalISO, parseLocalISO,
+  api, apiPost,
+  seriesResponseToRenderer, matrixResponseToHeatmap,
+  buildSharedTimeAxis, interpTo, alignExact,
+} from "./utils.js";
+
 import {
   plot, lastRenderData,
   destroyPlot, chartUpdate, buildLegend,
   setZoom, clearZoom, watchChartResize,
-  setChartCursor, setHoverSync, setChartDrawSync, setTooltipEnricher,
-  getValuesAtTime,
-} from './chart.js';
+  setChartCursor, setHoverSync, setChartDrawSync,
+  setTooltipEnricher, getValuesAtTime,
+} from "./chart.js";
+
 import {
-  initHeatmap, updateHeatmap, highlightColumn, redrawHeatmap,
-  setHeatmapTooltipExtra,
-} from './heatmap.js';
+  initHeatmap, updateHeatmap, highlightColumn,
+  redrawHeatmap, setHeatmapTooltipExtra,
+} from "./heatmap.js";
+
 import {
-  updateHistograms, clearHistograms, setHistogramHover,
-  clearHistogramHover, binInfoLine,
-} from './histogram.js';
+  updateHistograms, clearHistograms,
+  setHistogramHover, clearHistogramHover, binInfoLine,
+} from "./histogram.js";
 
-// ── State ─────────────────────────────────────────────────────────────────────
-let entities      = [];
-let selected      = [];
-let datasetId     = null;
-let measureId     = "value";
-let view          = { t0: null, t1: null };
-let dataExtent    = null;
+// ── Application state ────────────────────────────────────────────────────
 
-// ── Controls ──────────────────────────────────────────────────────────────────
-const showHeatmap = () => $("#showHeatmap").checked;
-const showHist    = () => $("#showHist").checked;
-const histBinCount = () => Math.min(100, Math.max(4,
-  Math.round(Number($("#histBins")?.value) || 24)));
+let entities = [];           // all entities from the current dataset
+let selected = [];           // currently selected entities
+let datasetId = null;        // active dataset ID
+let measureId = "value";     // active measure ID
+let view = { t0: null, t1: null }; // current time range
+let dataExtent = null;       // full dataset time extent { t0, t1 }
+let lastResults = [];        // raw API results from last fetch (for re-rendering)
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
+// UI helpers
+const isHeatmapVisible = () => $("#showHeatmap").checked;
+const isHistogramVisible = () => $("#showHist").checked;
+const getHistogramBinCount = () =>
+  Math.min(100, Math.max(4, Math.round(Number($("#histBins")?.value) || 24)));
+const getInterpolationMode = () => $("#interpMode")?.value || "linear";
+
+// ── Dataset loading ──────────────────────────────────────────────────────
+
 async function loadDataset(id) {
   try {
-    const datasets = await api("/api/datasets", {});
-    if (!datasets?.length) throw new Error("no datasets are configured");
+    const datasets = await api("/api/datasets");
+    if (!datasets?.length) throw new Error("no datasets configured");
+
     datasetId = id || datasets[0].id;
     const base = `/api/datasets/${encodeURIComponent(datasetId)}`;
+
+    // Fetch entities, schema, and extent in parallel
     const [entityPage, schema, extent] = await Promise.all([
       api(`${base}/entities`, { limit: 10000 }),
-      api(`${base}/schema`, {}),
-      api(`${base}/extent`, {}),
+      api(`${base}/schema`),
+      api(`${base}/extent`),
     ]);
+
     measureId = schema?.measures?.[0]?.id || "value";
-    entities = (entityPage.items || []).map(entity => ({
-      entity_id: entity.id,
-      label: entity.label,
-      name: entity.label,
-      attributes: entity.attributes || {},
+    entities = (entityPage.items || []).map((item) => ({
+      entity_id: item.id,
+      label: item.label,
+      name: item.label,
+      attributes: item.attributes || {},
     }));
+
     dataExtent = { t0: extent.start, t1: extent.end };
+
+    // Update page title
     document.title = `${schema.label} · Time-series Explorer`;
-    const heading = document.querySelector('header h1');
+    const heading = document.querySelector("header h1");
     if (heading) heading.textContent = schema.label.toUpperCase();
+
+    // Show entities
     if (!entities.length) {
       $("#entitylist").innerHTML =
-        '<div style="color:var(--dim);padding:8px">no entities available</div>';
+        '<div style="color:var(--dim);padding:8px">no entities</div>';
       return;
     }
+
     renderEntityList("");
-    const t0 = extent.end - 86400;
-    const t1 = extent.end;
-    $("#dt0").value = toLocalISO(new Date(t0 * 1000));
-    $("#dt1").value = toLocalISO(new Date(t1 * 1000));
+
+    // Default to last 24 hours
+    $("#dt0").value = toLocalISO(new Date((extent.end - 86400) * 1000));
+    $("#dt1").value = toLocalISO(new Date(extent.end * 1000));
   } catch (err) {
-    console.error('dataset discovery failed', err);
+    console.error("dataset load failed", err);
     $("#entitylist").innerHTML =
-      `<div style="color:#b00;padding:8px">failed to load dataset: ${err.message}</div>`;
+      `<div style="color:#b00;padding:8px">failed: ${err.message}</div>`;
   }
 }
 
-// Populate the Data Sources selector + registered-config list, then load the
-// currently selected dataset (or the first one).
 async function loadDataSources() {
   try {
     const [datasets, configs] = await Promise.all([
-      api("/api/datasets", {}),
-      api("/api/configs", {}),
+      api("/api/datasets"),
+      api("/api/configs"),
     ]);
+
+    // Populate dataset selector
     const select = $("#datasetSelect");
     if (!select) return;
     const previous = select.value;
     select.innerHTML = "";
-    (datasets || []).forEach(ds => {
-      const opt = document.createElement("option");
-      opt.value = ds.id;
-      opt.textContent = ds.label;
-      select.appendChild(opt);
+
+    (datasets || []).forEach((ds) => {
+      const option = document.createElement("option");
+      option.value = ds.id;
+      option.textContent = ds.label;
+      select.appendChild(option);
     });
-    if (previous && datasets.some(ds => ds.id === previous)) {
+
+    if (previous && datasets.some((d) => d.id === previous)) {
       select.value = previous;
     }
+
     renderConfigList(configs || []);
+
     if (datasets?.length) {
       await loadDataset(select.value || datasets[0].id);
     } else {
-      // No preloaded datasets — the user must register their own source.
       showEmptyState();
     }
   } catch (err) {
-    console.error('data sources failed to load', err);
+    console.error("data sources failed", err);
   }
 }
 
-// First-run / zero-dataset state: guide the user to the Data sources panel.
 function showEmptyState() {
   const panel = $("#dsPanel");
   if (panel) panel.open = true;
-  $("#entitylist").innerHTML =
-    '<div class="empty-state">' +
-      '<div class="empty-title">No data source registered</div>' +
-      '<div class="empty-sub">Open the <b>Data sources</b> panel above, paste ' +
-      'your API URL + config.json, and click <b>Register</b>.</div>' +
-    '</div>';
-  const legend = $("#legend");
-  if (legend) legend.textContent =
-    'Register a data source to start exploring';
-  const stats = $("#stats");
-  if (stats) stats.textContent = 'no data source';
+
+  $("#entitylist").innerHTML = `
+    <div class="empty-state">
+      <div class="empty-title">No data source</div>
+      <div class="empty-sub">
+        Open <b>Data sources</b>, paste config.json, click <b>Register</b>.
+      </div>
+    </div>`;
+  $("#legend").textContent = "Register a data source";
+  $("#stats").textContent = "no data source";
 }
+
+// ── Config list ──────────────────────────────────────────────────────────
 
 function renderConfigList(configs) {
   const list = $("#configList");
   if (!list) return;
   list.innerHTML = "";
-  (configs || []).forEach(cfg => {
+
+  (configs || []).forEach((cfg) => {
     const row = document.createElement("div");
     row.className = "config-row";
+
     const info = document.createElement("span");
     info.className = "config-info";
     info.textContent = cfg.label;
-    info.title = `${cfg.id} · fingerprint ${cfg.fingerprint}`;
-    const del = document.createElement("button");
-    del.className = "config-del";
-    del.textContent = "✕";
-    del.title = "Remove this dataset and its cache";
-    del.onclick = async () => {
-      if (!confirm(`Remove dataset "${cfg.label}" and drop its cache?`)) return;
+
+    const removeBtn = document.createElement("button");
+    removeBtn.className = "config-del";
+    removeBtn.textContent = "✕";
+    removeBtn.onclick = async () => {
+      if (!confirm(`Remove "${cfg.label}"?`)) return;
       try {
         await api(`/api/configs/${encodeURIComponent(cfg.id)}`, {}, null, "DELETE");
         await loadDataSources();
       } catch (err) {
-        $("#stats").textContent = `Remove failed: ${err.message}`;
+        $("#stats").textContent = `Failed: ${err.message}`;
       }
     };
-    row.appendChild(info);
-    row.appendChild(del);
+
+    row.append(info, removeBtn);
     list.appendChild(row);
   });
 }
 
+// ── Entity list ──────────────────────────────────────────────────────────
+
 function renderEntityList(filter) {
   const list = $("#entitylist");
   list.innerHTML = "";
+
   entities
-    .filter(c => c.name.toLowerCase().includes(filter.toLowerCase()))
-    .forEach(c => {
+    .filter((e) => e.name.toLowerCase().includes(filter.toLowerCase()))
+    .forEach((entity) => {
       const label = document.createElement("label");
-      const cb    = document.createElement("input");
-      cb.type    = "checkbox";
-      cb.checked = selected.some(s => s.entity_id === c.entity_id);
-      cb.onchange = () => toggleEntity(c);
-      const swatch    = document.createElement("span");
+
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = selected.some((s) => s.entity_id === entity.entity_id);
+      checkbox.onchange = () => toggleEntity(entity);
+
+      const swatch = document.createElement("span");
       swatch.className = "legend-swatch";
-      const idx = selected.findIndex(s => s.entity_id === c.entity_id);
+      const idx = selected.findIndex((s) => s.entity_id === entity.entity_id);
       swatch.style.background = idx >= 0 ? COLORS[idx % COLORS.length] : "transparent";
-      label.appendChild(cb);
-      label.appendChild(swatch);
-      label.appendChild(document.createTextNode(c.label || c.name));
-      label.title = c.name;
+
+      label.append(checkbox, swatch, document.createTextNode(entity.label || entity.name));
       list.appendChild(label);
     });
 }
 
-async function toggleEntity(c) {
-  const i = selected.findIndex(s => s.entity_id === c.entity_id);
-  if (i >= 0) {
-    selected.splice(i, 1);
+async function toggleEntity(entity) {
+  const index = selected.findIndex((s) => s.entity_id === entity.entity_id);
+
+  if (index >= 0) {
+    selected.splice(index, 1);
   } else if (selected.length < MAX_SERIES) {
-    selected.push(c);
+    selected.push(entity);
   } else {
-    $("#stats").textContent = `Select up to ${MAX_SERIES} entities`;
+    $("#stats").textContent = `Max ${MAX_SERIES} entities`;
   }
+
   renderEntityList($("#filter").value || "");
   buildLegend(selected);
 }
 
-// ── Navigation ────────────────────────────────────────────────────────────────
-let navTimer   = null;
-let navBurst   = false;   // a scroll/zoom burst is in progress
-let abortController = null;
-let requestSeq = 0;
-let statusTimer = null;
+// ── Navigation ───────────────────────────────────────────────────────────
 
-function stopStatusPoll() {
-  if (statusTimer) {
-    clearInterval(statusTimer);
-    statusTimer = null;
-  }
-}
+let navTimer = null;
+let navBurst = false;        // true while user is actively scrolling/zooming
+let abortController = null;
+let requestSequence = 0;
+let statusPollTimer = null;
 
 function startStatusPoll() {
   stopStatusPoll();
-  statusTimer = setInterval(async () => {
+  statusPollTimer = setInterval(async () => {
     try {
-      const st = await api("/api/status", {});
-      const r = st.refreshing || [];
-      if (r.length) {
+      const status = await api("/api/status");
+      if (status.refreshing?.length) {
         $("#stats").innerHTML =
-          `<span class="stat-block refresh">⟳ refreshing ${r.join(", ")}</span>`;
+          '<span class="stat-block refresh">⟳ refreshing</span>';
       }
-    } catch { /* ignore transient poll errors */ }
+    } catch { /* ignore transient errors */ }
   }, 800);
 }
 
-function navTo(t0, t1) {
-  // Free navigation within the FULL dataset extent. The allowed window is the
-  // dataset extent — NOT the last "Go" range — so zooming or panning into a
-  // new region never snaps back to the initial query range. Falls back to the
-  // requested range / current view only when the extent is unknown.
-  let lo = dataExtent?.t0 ?? Math.min(t0, view.t0 ?? t0);
-  let hi = dataExtent?.t1 ?? Math.max(t1, view.t1 ?? t1);
-  if (hi <= lo) { lo = t0; hi = t1; }
+function stopStatusPoll() {
+  if (statusPollTimer) {
+    clearInterval(statusPollTimer);
+    statusPollTimer = null;
+  }
+}
 
-  const maxSpan = hi - lo;
-  let span = Math.min(Math.max(t1 - t0, 1), maxSpan);
-  const c  = (t0 + t1) / 2;
-  t0 = c - span / 2; t1 = c + span / 2;
-  if (t0 < lo) { t0 = lo; t1 = lo + span; }
-  if (t1 > hi) { t1 = hi; t0 = hi - span; }
-  if (view.t0 === t0 && view.t1 === t1) return;
+function navigateTo(start, end) {
+  // Clamp to dataset extent
+  let lo = dataExtent?.t0 ?? Math.min(start, view.t0 ?? start);
+  let hi = dataExtent?.t1 ?? Math.max(end, view.t1 ?? end);
+  if (hi <= lo) { lo = start; hi = end; }
 
-  view = { t0, t1 };
-  setZoom(t0, t1);
-  if (plot) plot.setScale("x", { min: t0, max: t1 });
-  $("#dt0").value = toLocalISO(new Date(t0 * 1000));
-  $("#dt1").value = toLocalISO(new Date(t1 * 1000));
+  const span = Math.min(Math.max(end - start, 1), hi - lo);
+  const center = (start + end) / 2;
+  start = center - span / 2;
+  end = center + span / 2;
 
-  // Keep the gesture smooth: while the user is actively scrolling/dragging we
-  // only rescale the existing plot (cheap, 60fps). The heavy work — querying
-  // the source and rebuilding chart/histograms/heatmap — runs ONCE on the
-  // trailing edge, after movement settles. Doing it mid-gesture (leading edge)
-  // stalled a frame on the first, uncached view of a range ("stuck" zoom).
+  if (start < lo) { start = lo; end = lo + span; }
+  if (end > hi) { end = hi; start = hi - span; }
+
+  if (view.t0 === start && view.t1 === end) return;
+
+  view = { t0: start, t1: end };
+  setZoom(start, end);
+
+  if (plot) plot.setScale("x", { min: start, max: end });
+  $("#dt0").value = toLocalISO(new Date(start * 1000));
+  $("#dt1").value = toLocalISO(new Date(end * 1000));
+
+  // Debounce: only fetch data after movement settles
   navBurst = true;
   if (navTimer) clearTimeout(navTimer);
   navTimer = setTimeout(() => {
@@ -258,248 +289,282 @@ function navTo(t0, t1) {
   }, 180);
 }
 
-// ── Chart-data assembly + panels (helpers for fetchData) ─────────────────────
+// ── Data assembly ────────────────────────────────────────────────────────
 
-// Turn canonical series results into the uPlot data matrix plus the per-entity
-// evidence metadata and the aggregate counters shown in the stats bar.
-function buildChartData(results, rawMode) {
-  const allT = buildSharedTimeAxis(results);
-  const data = [allT];
+/**
+ * Transform API results into the format the chart renderer expects.
+ */
+function buildChartData(results, interpMode) {
+  const allTimes = buildSharedTimeAxis(results);
+  const data = [allTimes];
   const bandByEntity = [];
   const entityMeta = [];
-  const agg = {
+
+  const stats = {
     scanned: 0, rawTotal: 0, sent: 0, gapTotal: 0,
     dbMs: 0, dsMs: 0, resName: "raw", respAlgo: "M4", hasData: false,
   };
 
-  (Array.isArray(results) ? results : []).forEach(r => {
-    if (!(r && !r.error && r.series.t.length)) {
-      data.push(new Array(allT.length).fill(null));
+  for (const result of (Array.isArray(results) ? results : [])) {
+    // Error or empty series
+    if (!result || result.error || !result.series.t.length) {
+      data.push(new Array(allTimes.length).fill(null));
       bandByEntity.push(false);
-      entityMeta.push({ observed: new Array(allT.length).fill(null), gaps: [] });
-      return;
+      entityMeta.push({
+        observed: new Array(allTimes.length).fill(null),
+        gaps: [],
+      });
+      continue;
     }
-    const s = r.series;
-    const gaps = r.gap_intervals || [];
-    const band = (r.algo === 'LTTB' || r.algo === 'MINMAXLTTB') && s.min !== undefined;
-    data.push(interpTo(allT, s.t, s.avg, rawMode, gaps));
-    if (band) {
-      data.push(interpTo(allT, s.min_t || s.t, s.min, rawMode, gaps));
-      data.push(interpTo(allT, s.max_t || s.t, s.max, rawMode, gaps));
+
+    const series = result.series;
+    const gaps = result.gap_intervals || [];
+    const hasBand = (result.algo === "LTTB" || result.algo === "MINMAXLTTB")
+      && series.min !== undefined;
+
+    // Interpolate values onto shared time axis
+    data.push(interpTo(allTimes, series.t, series.avg, interpMode, gaps));
+    if (hasBand) {
+      data.push(interpTo(allTimes, series.min_t || series.t, series.min, interpMode, gaps));
+      data.push(interpTo(allTimes, series.max_t || series.t, series.max, interpMode, gaps));
     }
-    bandByEntity.push(band);
+    bandByEntity.push(hasBand);
+
+    // Metadata for tooltip display
     entityMeta.push({
-      observed: alignExact(allT, s.t, s.avg),
-      quality: alignExact(allT, s.t, s.quality_flag || []),
-      sampleCount: alignExact(allT, s.t, s.sample_count || []),
+      observed: alignExact(allTimes, series.t, series.avg),
+      quality: alignExact(allTimes, series.t, series.quality_flag || []),
+      sampleCount: alignExact(allTimes, series.t, series.sample_count || []),
       gaps,
-      expectedStep: r.expected_step_seconds,
-      qualitySummary: r.quality_summary || {},
-      dataFidelity: r.data_fidelity || {},
+      expectedStep: result.expected_step_seconds,
+      qualitySummary: result.quality_summary || {},
+      dataFidelity: result.data_fidelity || {},
     });
-    agg.gapTotal += gaps.length;
-    agg.scanned  += r.rows_scanned;
-    agg.rawTotal += r.rows_raw;
-    agg.sent     += r.rows_returned;
-    agg.dbMs     = Math.max(agg.dbMs, r.query_ms);
-    agg.dsMs     = Math.max(agg.dsMs, r.ds_ms || 0);
-    agg.resName  = r.resolution;
-    agg.respAlgo = r.algo || "M4";
-    agg.hasData  = true;
-  });
-  return { data, bandByEntity, entityMeta, agg };
+
+    // Aggregate stats
+    stats.gapTotal += gaps.length;
+    stats.scanned += result.rows_scanned;
+    stats.rawTotal += result.rows_raw;
+    stats.sent += result.rows_returned;
+    stats.dbMs = Math.max(stats.dbMs, result.query_ms);
+    stats.dsMs = Math.max(stats.dsMs, result.ds_ms || 0);
+    stats.resName = result.resolution;
+    stats.respAlgo = result.algo || "M4";
+    stats.hasData = true;
+  }
+
+  return { data, bandByEntity, entityMeta, stats };
 }
 
-// Render the bottom stats bar (or a "no data" message) from the counters.
-function renderStatsBar(agg, results) {
-  if (!agg.hasData) { $("#stats").textContent = "no data in selected range"; return; }
-  const nFailed = selected.length - (Array.isArray(results)
-    ? results.filter(r => r && !r.error).length : 0);
-  const errHtml = nFailed
-    ? `<span class="stat-err"> ${nFailed} series failed</span>` : "";
+function renderStatsBar(stats, results) {
+  if (!stats.hasData) {
+    $("#stats").textContent = "no data in range";
+    return;
+  }
+
+  const failedCount = selected.length - (
+    Array.isArray(results)
+      ? results.filter((r) => r && !r.error).length
+      : 0
+  );
+  const errorHtml = failedCount
+    ? `<span class="stat-err"> ${failedCount} failed</span>`
+    : "";
+
   const spanHours = ((view.t1 - view.t0) / 3600).toFixed(1);
-  const stats = [
-    ['series', selected.length],
-    ['range', `${spanHours}h`],
-    ['tier', agg.resName],
-    ['raw', agg.rawTotal.toLocaleString()],
-    ['db', agg.scanned.toLocaleString()],
-    ['out', agg.sent.toLocaleString()],
-    ['gaps', agg.gapTotal],
-    ['db', `${agg.dbMs}ms`],
-    [agg.respAlgo, `${agg.dsMs}ms`],
+  const items = [
+    ["series", selected.length],
+    ["range", `${spanHours}h`],
+    ["tier", stats.resName],
+    ["raw", stats.rawTotal.toLocaleString()],
+    ["db", stats.scanned.toLocaleString()],
+    ["out", stats.sent.toLocaleString()],
+    ["gaps", stats.gapTotal],
+    ["db", `${stats.dbMs}ms`],
+    [stats.respAlgo, `${stats.dsMs}ms`],
   ];
-  $("#stats").innerHTML = stats
+
+  $("#stats").innerHTML = items
     .map(([label, value]) =>
-      `<span class="stat-block"><span class="stat-label">${label}</span>${value}</span>`)
-    .join('') + errHtml;
+      `<span class="stat-block">
+        <span class="stat-label">${label}</span>${value}
+      </span>`)
+    .join("") + errorHtml;
 }
 
-// Show/refresh or hide the per-entity histogram panel.
 function renderHistogramPanel(hasData) {
-  const histWrap = document.getElementById('histwrap');
-  if (!showHist()) { histWrap.style.display = 'none'; return; }
-  histWrap.style.display = '';
-  if (hasData && lastRenderData) updateHistograms(selected, lastRenderData, histBinCount());
-  else clearHistograms();
+  const wrap = document.getElementById("histwrap");
+  if (!isHistogramVisible()) {
+    wrap.style.display = "none";
+    return;
+  }
+  wrap.style.display = "";
+  if (hasData && lastRenderData) {
+    updateHistograms(selected, lastRenderData, getHistogramBinCount());
+  } else {
+    clearHistograms();
+  }
 }
 
-// ── Main fetch ────────────────────────────────────────────────────────────────
+// ── Main fetch ───────────────────────────────────────────────────────────
+
 async function fetchData() {
   if (!selected.length || view.t0 === null) return;
 
-  $("#stats").textContent = 'Loading…';
+  $("#stats").textContent = "Loading…";
+
+  // Cancel previous request
   if (abortController) abortController.abort();
   abortController = new AbortController();
   const signal = abortController.signal;
-  const myId   = ++requestSeq;
+  const myId = ++requestSequence;
+
   startStatusPoll();
+  const algo = $("#algo").value;
 
-  const params = {
-    px: px(), k: 2,
-    t0: view.t0, t1: view.t1,
-    algo: $("#algo").value,
-  };
-
-  // ── Series + overlay fetches ────────────────────────────────────────────
-  // The chart renders as soon as its own request completes. The heatmap
-  // overlay resolves independently below.
+  // Fetch series data
   const seriesPromise = apiPost("/api/query", {
     dataset_id: datasetId,
-    entity_ids: selected.map(entity => String(entity.entity_id)),
+    entity_ids: selected.map((e) => String(e.entity_id)),
     measure_ids: [measureId],
     range: { start: view.t0, end: view.t1 },
     resolution: {
       strategy: "auto",
-      pixel_width: params.px,
-      points_per_pixel: params.k,
+      pixel_width: chartPixelWidth(),
+      points_per_pixel: 2,
     },
-    downsampling: params.algo,
+    downsampling: algo,
     filters: {},
   }, signal)
     .then(seriesResponseToRenderer)
     .catch(() => []);
 
-  const heatmapPromise = (showHeatmap() && selected.length && !navBurst)
+  // Fetch heatmap data (only if visible and not during a scroll burst)
+  const heatmapPromise = (isHeatmapVisible() && selected.length && !navBurst)
     ? seriesPromise.then(() => apiPost("/api/matrix", {
         dataset_id: datasetId,
-        entity_ids: selected.map(entity => String(entity.entity_id)),
+        entity_ids: selected.map((e) => String(e.entity_id)),
         measure_id: measureId,
         range: { start: view.t0, end: view.t1 },
         transform: "temporal_rolling_zscore",
         pixel_width: Math.min(2000, Math.max(200,
-          document.getElementById('heatmap').offsetWidth || 200)),
-      }, signal).then(matrixResponseToHeatmap))
-      .catch(() => null)
+          document.getElementById("heatmap")?.offsetWidth || 200)),
+      }, signal).then(matrixResponseToHeatmap)).catch(() => null)
     : Promise.resolve(null);
 
+  // Wait for series data
   const results = await seriesPromise;
-  if (myId !== requestSeq) return;
+  if (myId !== requestSequence) return;
   stopStatusPoll();
 
-  // ── Build chart data + render chart ────────────────────────────────────────
-  const { data, bandByEntity, entityMeta, agg } =
-    buildChartData(results, $("#algo").value === 'RAW');
-  if (agg.hasData) {
-    chartUpdate(data, selected, navTo,
-      $("#perAxis").checked, bandByEntity, entityMeta);
+  // Store raw results for local re-rendering (e.g. interpolation change)
+  lastResults = results;
+
+  // Build and render chart
+  const interpMode = getInterpolationMode();
+  const { data, bandByEntity, entityMeta, stats } = buildChartData(results, interpMode);
+
+  if (stats.hasData) {
+    chartUpdate(data, selected, navigateTo,
+      $("#perAxis").checked, bandByEntity, entityMeta, interpMode);
     buildLegend(selected);
   }
 
-  // The primary evidence view is complete now; overlays resolve independently.
-  renderStatsBar(agg, results);
-  renderHistogramPanel(agg.hasData);
+  renderStatsBar(stats, results);
+  renderHistogramPanel(stats.hasData);
 
-  // ── Heatmap overlay ─────────────────────────────────────────────────────
-  const hmWrap = document.getElementById('heatmapwrap');
-  const hmState = document.getElementById('heatmapstate');
-  if (showHeatmap()) {
-    hmWrap.style.display = '';
+  // Update heatmap panel visibility
+  const heatmapWrap = document.getElementById("heatmapwrap");
+  const heatmapState = document.getElementById("heatmapstate");
+
+  if (isHeatmapVisible()) {
+    heatmapWrap.style.display = "";
     updateHeatmap(null);
-    if (hmState) hmState.textContent = 'loading…';
+    heatmapState.textContent = "loading…";
   } else {
-    hmWrap.style.display = 'none';
+    heatmapWrap.style.display = "none";
   }
 
+  // Wait for heatmap data
   const heatmapData = await heatmapPromise;
-  if (myId !== requestSeq) return;
+  if (myId !== requestSequence) return;
   stopStatusPoll();
 
-  if (showHeatmap()) {
+  // Update heatmap
+  if (isHeatmapVisible()) {
     if (heatmapData?.t?.length) {
-      updateHeatmap(heatmapData, hmNameMap());
-      if (hmState) {
-        const flat = (heatmapData.scores || []).flat();
-        const observed = flat.filter(v => v !== null && v !== undefined).length;
-        hmState.textContent = `ready · ${observed}/${flat.length} scored cells`;
-      }
+      updateHeatmap(heatmapData, entityNameMap());
+      const allScores = (heatmapData.scores || []).flat();
+      const observedCount = allScores.filter((v) => v != null).length;
+      heatmapState.textContent = `ready · ${observedCount}/${allScores.length} scored`;
     } else {
       updateHeatmap(null);
-      if (hmState) hmState.textContent = 'unavailable';
+      heatmapState.textContent = "unavailable";
     }
   }
 }
 
-// ── Event handlers ────────────────────────────────────────────────────────────
+// ── Event handlers ───────────────────────────────────────────────────────
+
 $("#clearCache").onclick = async () => {
-  if (!confirm("Clear all cached data and reload?")) return;
+  if (!confirm("Clear all cached data?")) return;
   try {
-    await api("/api/clear-cache", {});
+    await api("/api/clear-cache");
     location.reload();
   } catch (err) {
-    $("#stats").textContent = `Clear cache failed: ${err.message}`;
+    $("#stats").textContent = `Failed: ${err.message}`;
   }
 };
 
-function applyRange(t0, t1) {
-  if (t0 === null || t1 === null || t1 <= t0) return;
-  view       = { t0, t1 };
+function applyRange(start, end) {
+  if (start == null || end == null || end <= start) return;
+
+  view = { t0: start, t1: end };
   clearZoom();
-  if (navTimer) {
-    clearTimeout(navTimer);
-    navTimer = null;
-  }
+  if (navTimer) { clearTimeout(navTimer); navTimer = null; }
   navBurst = false;
   destroyPlot();
-  document.getElementById('chart').innerHTML = '';
-  $("#stats").textContent = 'Loading…';
+  document.getElementById("chart").innerHTML = "";
+  $("#stats").textContent = "Loading…";
   fetchData();
 }
 
 $("#applyRange").onclick = () =>
   applyRange(parseLocalISO($("#dt0").value), parseLocalISO($("#dt1").value));
 
-// Jump the main chart to the given timestamp (heatmap click) — recentres on
-// the clicked time while keeping the current span, like pressing Go.
-function seekTo(t) {
+function seekTo(time) {
   const span = view.t1 - view.t0 || 3600;
-  const t0 = (dataExtent ? Math.max(dataExtent.t0, t - span / 2) : t - span / 2);
-  const t1 = Math.min((dataExtent ? dataExtent.t1 : t + span / 2), t0 + span);
-  applyRange(t0, t1);
+  const start = dataExtent
+    ? Math.max(dataExtent.t0, time - span / 2)
+    : time - span / 2;
+  const end = Math.min(dataExtent?.t1 || time + span / 2, start + span);
+  applyRange(start, end);
 }
 
-// Canonical entity ID → display label, for heatmap axis labels
-function hmNameMap() {
+function entityNameMap() {
   return Object.fromEntries(
-    entities.map(c => [c.entity_id, c.label || c.name])
+    entities.map((e) => [e.entity_id, e.label || e.name])
   );
 }
 
-$("#filter").addEventListener("input", e => renderEntityList(e.target.value));
+// Filter input
+$("#filter").addEventListener("input", (e) => renderEntityList(e.target.value));
 
-// Data Sources panel: switch active dataset / register a new config.json
-$("#datasetSelect")?.addEventListener("change", e => {
+// Dataset selector
+$("#datasetSelect")?.addEventListener("change", (e) => {
   if (!e.target.value) return;
   destroyPlot();
-  document.getElementById('chart').innerHTML = '';
+  document.getElementById("chart").innerHTML = "";
   selected = [];
   buildLegend([]);
   loadDataset(e.target.value);
 });
 
+// Register config
 $("#registerConfig")?.addEventListener("click", async () => {
   const raw = $("#configJson")?.value;
   if (!raw?.trim()) return;
+
   let payload;
   try {
     payload = JSON.parse(raw);
@@ -507,87 +572,128 @@ $("#registerConfig")?.addEventListener("click", async () => {
     $("#stats").textContent = `Invalid JSON: ${err.message}`;
     return;
   }
-  $("#stats").textContent = 'Registering data source…';
+
+  $("#stats").textContent = "Registering…";
   try {
     await apiPost("/api/configs", { config: payload });
     $("#configJson").value = "";
-    $("#stats").textContent = 'Data source registered';
+    $("#stats").textContent = "Registered";
     await loadDataSources();
   } catch (err) {
-    $("#stats").textContent = `Register failed: ${err.message}`;
+    $("#stats").textContent = `Failed: ${err.message}`;
   }
 });
 
-// Re-render with current data when toggles change
+// Toggle controls
 $("#showHeatmap").addEventListener("change", () => {
-  if (selected.length && view.t0 !== null) fetchData();
+  if (selected.length && view.t0) fetchData();
 });
 
-// Histograms rebuild from the last chart data — instant, no refetch needed.
+// Interpolation mode change: re-render instantly from cached data (no backend call)
+function rerenderInterpolation() {
+  console.log("[tsviz] interpolation changed:", getInterpolationMode(), "results:", lastResults?.length);
+  if (!lastResults?.length || !selected.length || view.t0 === null) return;
+
+  const interpMode = getInterpolationMode();
+  const { data, bandByEntity, entityMeta, stats } =
+    buildChartData(lastResults, interpMode);
+
+  if (stats.hasData) {
+    // Force full rebuild to guarantee visual update
+    destroyPlot();
+    chartUpdate(data, selected, navigateTo,
+      $("#perAxis").checked, bandByEntity, entityMeta, interpMode);
+    if (isHistogramVisible()) {
+      updateHistograms(selected, lastRenderData, getHistogramBinCount());
+    }
+  }
+}
+
+$("#interpMode").addEventListener("change", rerenderInterpolation);
+
 $("#showHist").addEventListener("change", () => {
-  const wrap = document.getElementById('histwrap');
-  if (showHist()) {
-    wrap.style.display = '';
-    if (lastRenderData) updateHistograms(selected, lastRenderData, histBinCount());
+  const wrap = document.getElementById("histwrap");
+  if (isHistogramVisible()) {
+    wrap.style.display = "";
+    if (lastRenderData) updateHistograms(selected, lastRenderData, getHistogramBinCount());
   } else {
-    wrap.style.display = 'none';
+    wrap.style.display = "none";
     clearHistogramHover();
   }
 });
 
-const savedHistBins = Number(localStorage.getItem('histBins'));
-if (savedHistBins >= 4 && savedHistBins <= 100) {
-  $("#histBins").value = String(Math.round(savedHistBins));
+// Histogram bin count
+const savedBins = Number(localStorage.getItem("histBins"));
+if (savedBins >= 4 && savedBins <= 100) {
+  $("#histBins").value = String(Math.round(savedBins));
 }
 $("#histBins").addEventListener("input", () => {
-  const bins = histBinCount();
-  localStorage.setItem('histBins', String(bins));
-  if (showHist() && lastRenderData) {
-    updateHistograms(selected, lastRenderData, bins);
+  const count = getHistogramBinCount();
+  localStorage.setItem("histBins", String(count));
+  if (isHistogramVisible() && lastRenderData) {
+    updateHistograms(selected, lastRenderData, count);
   }
 });
 
+// Per-entity Y axes
 $("#perAxis").addEventListener("change", () => {
   if (lastRenderData?.data && selected.length) {
     destroyPlot();
     chartUpdate(
-      lastRenderData.data, selected, navTo,
-      $("#perAxis").checked, lastRenderData.bandByEntity,
-      lastRenderData.entityMeta
+      lastRenderData.data, selected, navigateTo,
+      $("#perAxis").checked, lastRenderData.bandByEntity, lastRenderData.entityMeta,
+      lastRenderData.interpMode
     );
   }
 });
 
+// Window resize
 window.addEventListener("resize", () => {
   if (selected.length && view.t0) fetchData();
 });
 
-// Extra HTML for the heatmap tooltip: the graph's values at that time.
-function graphInfoAt(t) {
-  const got = getValuesAtTime(t);
-  if (!got) return '';
+// ── Heatmap → chart tooltip info ─────────────────────────────────────────
+
+function graphInfoAt(time) {
+  const got = getValuesAtTime(time);
+  if (!got) return "";
+
   let html = '<div style="border-top:1px solid #e5e5e5;margin-top:4px;padding-top:3px">';
-  got.selected.forEach((c, i) => {
-    const v = got.values[i];
-    html += `<div class="tt-row">
-      <span class="tt-swatch" style="background:${COLORS[i % COLORS.length]}"></span>
-      <span class="tt-name">${c.label || c.name}</span>
-      <span class="tt-val">${v === null || v === undefined ? '-' : Math.round(v * 1e6) / 1e6}</span>
-    </div>`;
+  got.selected.forEach((entity, i) => {
+    const value = got.values[i];
+    const color = COLORS[i % COLORS.length];
+    const displayValue = value == null ? "-" : Math.round(value * 1e6) / 1e6;
+    html += `
+      <div class="tt-row">
+        <span class="tt-swatch" style="background:${color}"></span>
+        <span class="tt-name">${entity.label || entity.name}</span>
+        <span class="tt-val">${displayValue}</span>
+      </div>`;
   });
-  return html + '</div>';
+  return html + "</div>";
 }
 
-// ── Init heatmap canvas + chart resize watching ──────────────────────────────
-initHeatmap(document.getElementById('heatmap'), {
-  onSeek:  seekTo,
-  onHover: t => { setChartCursor(t); if (showHist()) setHistogramHover(t); },
-});
-setHoverSync(t => { highlightColumn(t); if (showHist()) setHistogramHover(t); });
-setChartDrawSync(redrawHeatmap);            // every chart redraw re-syncs the heatmap
-setTooltipEnricher((i, v) => showHist() ? binInfoLine(i, v) : '');
-setHeatmapTooltipExtra(graphInfoAt);        // heatmap tooltip shows the graph's values
-watchChartResize();
+// ── Initialize ───────────────────────────────────────────────────────────
 
-// ── Boot ──────────────────────────────────────────────────────────────────────
+initHeatmap(document.getElementById("heatmap"), {
+  onSeek: seekTo,
+  onHover: (time) => {
+    setChartCursor(time);
+    if (isHistogramVisible()) setHistogramHover(time);
+  },
+});
+
+setHoverSync((time) => {
+  highlightColumn(time);
+  if (isHistogramVisible()) setHistogramHover(time);
+});
+
+setChartDrawSync(redrawHeatmap);
+
+setTooltipEnricher((entityIndex, value) =>
+  isHistogramVisible() ? binInfoLine(entityIndex, value) : ""
+);
+
+setHeatmapTooltipExtra(graphInfoAt);
+watchChartResize();
 loadDataSources();

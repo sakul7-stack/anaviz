@@ -1,443 +1,449 @@
 /**
- * heatmap.js — canvas-based cross-entity heatmap renderer.
+ * heatmap.js — Canvas-based cross-entity temporal z-score heatmap.
  *
- * Visual encoding:
- *   score 0.0 (z ≈ -3, below normal) → blue  rgb(0,  20, 180)
- *   score 0.5 (z =  0, normal)        → dark  rgb(10, 10,  10)
- *   score 1.0 (z ≈ +3, anomalous)     → red   rgb(220,20,  0)
+ * Color scale:
+ *   z ≈ -3 (below normal) → blue
+ *   z ≈  0 (normal)       → green
+ *   z ≈ +3 (anomalous)    → red
+ *   null                  → gray (missing)
  *
- * Features: entity names on the Y axis, time labels on the X axis,
- * hover crosshair + tooltip (time · entity · z-score · graph values),
- * and click-to-jump (recenters the main chart on the clicked timestamp).
+ * The heatmap is pixel-aligned with the main chart through the shared
+ * x-scale. Every chart redraw calls redrawHeatmap() to keep them in sync.
  *
- * SYNC: every column is positioned by TIME through the live chart's own
- * x-scale (uPlot.valToPos), so the heatmap is pixel-aligned with the graph
- * even while zooming (stale buckets map to their true time positions) and
- * never drifts after chart rebuilds/resizes. `redrawHeatmap()` is wired to
- * the chart's draw hook in app.js so any chart redraw re-syncs this view.
- *
- * Height: a drag handle (#heatmap-resizer) above the panel resizes it; the
- * choice persists in localStorage. Double-click the handle to auto-size.
+ * Features:
+ *  - Entity names on Y axis, time labels on X axis
+ *  - Hover crosshair + tooltip (entity, time, z-score)
+ *  - Click to jump the main chart to that time
+ *  - Drag handle to resize height (persisted in localStorage)
  */
+import { plot as mainPlot, getPlotGeometry, xForTime } from "./chart.js";
 
-import {
-  plot as mainPlot,
-  getPlotGeometry,
-  xForTime,
-} from './chart.js';
+// ── State ────────────────────────────────────────────────────────────────
 
-let _canvas     = null;
-let _lastData   = null;
-let _nameMap    = {};
-let _onSeek     = null;
-let _onHover    = null;
-let _tooltipExtra = null;   // (unixTs) → extra HTML appended to the tooltip
-let _hover      = { col: -1, row: -1 };
-let _raf        = null;
-let _renderedData = null;   // last _lastData actually painted
-let _lastKey    = null;     // last geometry+x-range painted
+let canvas = null;
+let data = null;       // current heatmap data
+let nameMap = {};      // entity ID → display label
+let onSeek = null;     // click callback: (unixTime) => void
+let onHover = null;    // hover callback: (unixTime | null) => void
+let tooltipExtra = null; // extra tooltip HTML: (unixTime) => string
+let hover = { col: -1, row: -1 };
+let rafId = null;      // requestAnimationFrame handle
+let lastPaintedKey = null; // geometry key of last paint (skip no-op repaints)
+
+// ── Public API ───────────────────────────────────────────────────────────
 
 /**
- * Bind the heatmap to a canvas element.
- * Call once on page load.
- * @param {HTMLCanvasElement} canvas
- * @param {Object} [opts]  { onSeek: (unixTs) => void, onHover: (unixTs|null) => void }
+ * Initialize the heatmap. Call once on page load.
+ * @param {HTMLCanvasElement} canvasEl
+ * @param {Object} opts - { onSeek, onHover }
  */
-export function initHeatmap(canvas, opts = {}) {
-  _canvas = canvas;
-  _onSeek = opts.onSeek || null;
-  _onHover = opts.onHover || null;
-  canvas.addEventListener('mousemove', e => _onMove(e));
-  canvas.addEventListener('mouseleave', () => {
-    _hover = { col: -1, row: -1 };
-    _hideTooltip();
-    if (_onHover) _onHover(null);
-    _render();
+export function initHeatmap(canvasEl, opts = {}) {
+  canvas = canvasEl;
+  onSeek = opts.onSeek || null;
+  onHover = opts.onHover || null;
+
+  canvas.addEventListener("mousemove", handleMouseMove);
+  canvas.addEventListener("mouseleave", () => {
+    hover = { col: -1, row: -1 };
+    hideTooltip();
+    onHover?.(null);
+    render();
   });
-  canvas.addEventListener('click', e => {
-    if (!_lastData || _onSeek === null) return;
-    const col = _colAt(e.offsetX);
-    if (col >= 0) _onSeek(_lastData.t[col]);
+  canvas.addEventListener("click", (e) => {
+    if (!data || !onSeek) return;
+    const col = columnAtX(e.offsetX);
+    if (col >= 0) onSeek(data.t[col]);
   });
 
-  const resizer = document.getElementById('heatmap-resizer');
-  if (resizer) {
-    resizer.addEventListener('mousedown', e => {
-      e.preventDefault();
-      resizer.classList.add('active');
-      const plotEl = canvas.parentElement;
-      const startY = e.clientY;
-      const startH = plotEl.getBoundingClientRect().height;
-      const onMove = ev => {
-        const h = Math.min(Math.max(startH + (startY - ev.clientY), 48), 520);
-        plotEl.style.height = h + 'px';
-        localStorage.setItem('hmHeight', String(Math.round(h)));
-        redrawHeatmap();
-      };
-      const onUp = () => {
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup',   onUp);
-        resizer.classList.remove('active');
-      };
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup',   onUp);
-    });
-    resizer.addEventListener('dblclick', () => {
-      localStorage.removeItem('hmHeight');
-      if (_lastData) { _sizeToRows(_lastData.entity_ids.length); redrawHeatmap(); }
-    });
-  }
+  setupDragResizer();
 }
 
-/** Register a callback (unixTs) → extra tooltip HTML (graph values at that time). */
-export function setHeatmapTooltipExtra(fn) { _tooltipExtra = fn; }
+/** Register extra tooltip HTML callback. */
+export function setHeatmapTooltipExtra(fn) {
+  tooltipExtra = fn;
+}
 
 /**
- * Render a new heatmap frame.
- * @param {Object} data   Canonical matrix data adapted for this renderer
- *   { t: float[], entity_ids: string[], scores: (float|null)[][] }
- * @param {Object} nameMap  entity ID → display label
+ * Update the heatmap with new data.
+ * @param {Object|null} newData - { t: float[], entity_ids: string[], scores: (float|null)[][] }
+ * @param {Object} entityNames - { entityId: displayLabel }
  */
-export function updateHeatmap(data, nameMap = {}) {
-  if (!_canvas || !data?.t?.length || !data?.entity_ids?.length) {
-    _lastData = null;
-    _renderedData = null;
-    _hover = { col: -1, row: -1 };
-    if (_canvas) {
-      const ctx = _canvas.getContext('2d');
-      ctx.clearRect(0, 0, _canvas.width, _canvas.height);
-    }
-    _clearYAxis();
-    _clearXAxis();
+export function updateHeatmap(newData, entityNames = {}) {
+  if (!canvas || !newData?.t?.length || !newData?.entity_ids?.length) {
+    data = null;
+    hover = { col: -1, row: -1 };
+    canvas?.getContext("2d").clearRect(0, 0, canvas.width, canvas.height);
+    clearAxis("heatmap-yaxis");
+    clearAxis("heatmap-xaxis");
     return;
   }
-  _nameMap = nameMap;
-  _lastData = data;
-  _renderedData = null;   // force a repaint even if geometry is unchanged
-  _hover = { col: -1, row: -1 };
-  _sizeToRows(data.entity_ids.length);
-  // Wait one frame so the panel has laid out (real offsetWidth/Height),
-  // otherwise the first paint uses the fallback pixel size.
-  requestAnimationFrame(() => { if (_lastData === data) _render(); });
+
+  nameMap = entityNames;
+  data = newData;
+  hover = { col: -1, row: -1 };
+  sizeToRowCount(data.entity_ids.length);
+
+  requestAnimationFrame(() => {
+    if (data === newData) render();
+  });
 }
 
-// Current geometry + visible x-range, as a comparable key. The x-range is
-// part of the key because zooming changes the time→pixel mapping WITHOUT
-// changing gut/plotW — those are exactly the repaints we must not skip.
-function _geomKey() {
-  const g = getPlotGeometry();
-  let xmin = null, xmax = null;
-  if (mainPlot?.scales?.x) {
-    xmin = mainPlot.scales.x.min ?? null;
-    xmax = mainPlot.scales.x.max ?? null;
-  }
-  return { cssW: g.cssW, gut: g.gut, plotW: g.plotW, xmin, xmax };
-}
-
-/**
- * Re-render the heatmap with the CURRENT chart geometry (rAF-coalesced).
- * Called from the chart's draw hook so zoom/pan/resize/rebuild always
- * re-sync this view — no need to toggle the panel off/on anymore.
- * No-ops when neither the data nor the geometry/x-range changed (e.g. the
- * chart's hover-cursor redraws), so hovering/panning stays cheap.
- */
+/** Re-render with current chart geometry (called from chart's draw hook). */
 export function redrawHeatmap() {
-  if (!_lastData || _raf) return;
-  const key = _geomKey();
-  if (_renderedData === _lastData && _lastKey &&
-      key.cssW === _lastKey.cssW && key.gut === _lastKey.gut &&
-      key.plotW === _lastKey.plotW && key.xmin === _lastKey.xmin &&
-      key.xmax === _lastKey.xmax) {
-    return;
+  if (!data || rafId) return;
+
+  const key = geometryKey();
+  if (lastPaintedKey
+    && key.cssWidth === lastPaintedKey.cssWidth
+    && key.gutter === lastPaintedKey.gutter
+    && key.plotWidth === lastPaintedKey.plotWidth
+    && key.xMin === lastPaintedKey.xMin
+    && key.xMax === lastPaintedKey.xMax) {
+    return; // nothing changed, skip repaint
   }
-  _raf = requestAnimationFrame(() => {
-    _raf = null;
-    if (_lastData) _render();
+
+  rafId = requestAnimationFrame(() => {
+    rafId = null;
+    if (data) render();
   });
 }
 
-function _sizeToRows(nRows) {
-  const plotEl = _canvas.parentElement;
-  if (!plotEl) return;
-  const saved = Number(localStorage.getItem('hmHeight'));
-  if (saved >= 48) {
-    plotEl.style.height = saved + 'px';
+/** Highlight the column at the given timestamp (or clear it). */
+export function highlightColumn(time) {
+  if (!data) return;
+
+  if (time == null) {
+    hover = { col: -1, row: -1 };
+    render();
     return;
   }
-  plotEl.style.height = Math.min(Math.max(nRows * 13, 56), 176) + 'px';
+
+  hover = { col: findNearestColumn(time), row: -1 };
+  render();
 }
 
-// Time range covered by the current heatmap data (for the no-plot fallback).
-function _dataRange() {
-  if (!_lastData?.t?.length) return null;
-  return { t0: _lastData.t[0], t1: _lastData.t[_lastData.t.length - 1] };
+// ── Geometry helpers ─────────────────────────────────────────────────────
+
+function geometryKey() {
+  const geo = getPlotGeometry();
+  let xMin = null, xMax = null;
+  if (mainPlot?.scales?.x) {
+    xMin = mainPlot.scales.x.min ?? null;
+    xMax = mainPlot.scales.x.max ?? null;
+  }
+  return { cssWidth: geo.cssWidth, gutter: geo.gutter, plotWidth: geo.plotWidth, xMin, xMax };
 }
 
-// Column i pixel span [x0, x1) measured from the canvas left edge, derived
-// from the bucket's time edges mapped through the LIVE chart x-scale.
-function _colSpan(i, geo) {
-  const data = _lastData;
-  const n    = data.t.length;
-  const range  = _dataRange();
-  let lo, hi;
-  if (n > 1) {
-    const dt = (data.t[n - 1] - data.t[0]) / (n - 1);
-    lo = data.t[i] - dt / 2;
-    hi = data.t[i] + dt / 2;
-  } else {
-    lo = hi = data.t[i];
-  }
-  return {
-    x0: geo.gut + xForTime(lo, range),
-    x1: geo.gut + xForTime(hi, range),
-  };
-}
-
-function _render() {
-  const data     = _lastData;
-  const nCols    = data.t.length;
-  const nRows    = data.entity_ids.length;
-  const ctx      = _canvas.getContext('2d');
-  const geo      = getPlotGeometry();
-  const { cssW, gut, plotW } = geo;
-
-  // Pin the canvas CSS width to the chart width so the time axis spans the
-  // exact same pixels as the graph (equal even in narrow windows where the
-  // chart forces a minimum width).
-  if (cssW > 0 && _canvas.style.width !== cssW + 'px') {
-    _canvas.style.width = cssW + 'px';
-    document.getElementById('heatmap-xaxis')?.style.setProperty('width', cssW + 'px');
-  }
-
-  // Match canvas pixel size to its CSS layout size
-  const cssH = _canvas.offsetHeight || 160;
-  if (_canvas.width  !== cssW) _canvas.width  = cssW;
-  if (_canvas.height !== cssH) _canvas.height = cssH;
-
-  const cellH = Math.max(1, cssH / nRows);
-  const plotR = gut + plotW;
-
-  ctx.clearRect(0, 0, cssW, cssH);
-
-  // Pre-compute each column's pixel span (time → pixels via the live chart)
-  const spans = new Array(nCols);
-  for (let c = 0; c < nCols; c++) spans[c] = _colSpan(c, geo);
-
-  // Fill cells in two passes: base colours first, then a highlight overlay
-  // for the hovered column so it stands out without repainting everything.
-  for (let r = 0; r < nRows; r++) {
-    const row = data.scores[r];
-    for (let c = 0; c < nCols; c++) {
-      const s = spans[c];
-      const x0 = Math.max(gut, Math.round(s.x0));
-      const x1 = Math.min(plotR, Math.round(s.x1));
-      if (x1 <= x0) continue;                 // column is off-screen (zoomed out / stale data)
-      const score = row?.[c];
-      ctx.fillStyle = score == null ? 'rgb(125,125,125)' : _scoreToColor(score);
-      ctx.fillRect(x0, Math.round(r * cellH), x1 - x0, Math.ceil(cellH));
-    }
-  }
-
-  if (_hover.col >= 0 && _hover.col < nCols) {
-    const s = spans[_hover.col];
-    const x0 = Math.max(gut, Math.round(s.x0));
-    const x1 = Math.min(plotR, Math.round(s.x1));
-    if (x1 > x0) {
-      ctx.fillStyle = 'rgba(255,255,255,0.18)';
-      ctx.fillRect(x0, 0, x1 - x0, cssH);
-    }
-  }
-
-  _renderYAxis(data.entity_ids, nRows, cssH, cellH);
-  _renderXAxis(data.t, nCols, cssW, gut, plotW, spans);
-
-  _renderedData = data;
-  _lastKey = _geomKey();
-}
-
-/** Time under a canvas x (CSS px from the canvas left edge). */
-function _timeAt(x) {
-  if (!_lastData) return null;
-  const g = getPlotGeometry();
-  const range = _dataRange();
-  if (mainPlot) {
-    const t = mainPlot.posToVal(x - g.gut, 'x');
-    if (isFinite(t)) return t;
-  }
-  if (range && range.t1 > range.t0 && x >= g.gut) {
-    return range.t0 + ((x - g.gut) / g.plotW) * (range.t1 - range.t0);
-  }
-  return null;
-}
-
-function _colAt(x) {
-  if (!_lastData || !_lastData.t.length) return -1;
-  const t = _timeAt(x);
-  if (t == null) return -1;
-  const arr = _lastData.t;
+function findNearestColumn(time) {
+  const arr = data.t;
   let lo = 0, hi = arr.length - 1;
   while (hi - lo > 1) {
     const mid = (lo + hi) >> 1;
-    if (arr[mid] < t) lo = mid; else hi = mid;
+    if (arr[mid] < time) lo = mid; else hi = mid;
   }
-  return Math.abs(arr[lo] - t) <= Math.abs(arr[hi] - t) ? lo : hi;
+  return Math.abs(arr[lo] - time) <= Math.abs(arr[hi] - time) ? lo : hi;
 }
 
-function _onMove(e) {
-  if (!_lastData) return;
-  const col = _colAt(e.offsetX);
-  const cssH = _canvas.offsetHeight || 160;
-  const cellH = cssH / _lastData.entity_ids.length;
-  const row = Math.min(_lastData.entity_ids.length - 1, Math.floor(e.offsetY / cellH));
-  if (col !== _hover.col) {
-    _hover = { col, row };
-    _render();
+function sizeToRowCount(nRows) {
+  const parent = canvas.parentElement;
+  if (!parent) return;
+
+  const saved = Number(localStorage.getItem("hmHeight"));
+  if (saved >= 48) {
+    parent.style.height = Math.min(saved, 520) + "px";
   } else {
-    _hover.row = row;
+    const height = Math.min(Math.max(nRows * 13, 56), 176);
+    parent.style.height = height + "px";
   }
-  _showTooltip(e, col, row);
-  if (_onHover) _onHover(col >= 0 ? _lastData.t[col] : null);
 }
 
-/**
- * Highlight the heatmap column at the given timestamp (called from the main
- * chart's hover sync). Pass null to clear. No tooltip — the chart tooltip is
- * the one showing details at that point.
- * @param {number|null} t  unix timestamp
- */
-export function highlightColumn(t) {
-  if (!_lastData) return;
-  const nCols = _lastData.t.length;
-  if (t == null || nCols === 0) {
-    _hover = { col: -1, row: -1 };
-    _render();
-    return;
-  }
-  // binary search nearest bucket centre
-  const arr = _lastData.t;
-  let lo = 0, hi = nCols - 1;
-  while (hi - lo > 1) {
-    const mid = (lo + hi) >> 1;
-    if (arr[mid] < t) lo = mid; else hi = mid;
-  }
-  const col = Math.abs(arr[lo] - t) <= Math.abs(arr[hi] - t) ? lo : hi;
-  _hover = { col, row: -1 };
-  _render();
+function dataRange() {
+  if (!data?.t?.length) return null;
+  return { t0: data.t[0], t1: data.t[data.t.length - 1] };
 }
 
-function _showTooltip(e, col, row) {
-  const data = _lastData;
-  const tip  = document.getElementById('hm-tooltip');
-  if (!tip || col < 0 || row < 0 || !data?.t?.[col]) { _hideTooltip(); return; }
-  const score = data.scores?.[row]?.[col];
-  const cid   = data.entity_ids[row];
-  const name  = _nameMap[cid] || `ch ${cid}`;
-  const ts    = new Date(data.t[col] * 1000).toLocaleString();
-  let html = `<b>${name}</b> · ${ts}<br>`;
-  if (score == null) {
-    html += '<span class="hm-missing">no source sample in this time bucket</span>';
+/** Get the pixel span [x0, x1) for column i, aligned to the chart. */
+function columnSpan(index, geometry) {
+  const n = data.t.length;
+  let lo, hi;
+
+  if (n > 1) {
+    const dt = (data.t[n - 1] - data.t[0]) / (n - 1);
+    lo = data.t[index] - dt / 2;
+    hi = data.t[index] + dt / 2;
   } else {
-    const z = (score * 6 - 3).toFixed(2);
-    html += `z-score <b>${z}</b>`;
+    lo = hi = data.t[index];
   }
-  // Show the same per-entity values the main chart tooltip would show at
-  // this time, so the heatmap hover carries the graph's info too.
-  if (_tooltipExtra) {
-    const extra = _tooltipExtra(data.t[col]);
-    if (extra) html += `<div class="hm-extra">${extra}</div>`;
-  }
-  tip.innerHTML = html;
-  tip.style.display = 'block';
-  tip.style.left = Math.min(window.innerWidth  - 260, e.clientX + 14) + 'px';
-  tip.style.top  = Math.min(window.innerHeight - 90,  e.clientY + 14) + 'px';
+
+  const range = dataRange();
+  return {
+    x0: geometry.gutter + xForTime(lo, range),
+    x1: geometry.gutter + xForTime(hi, range),
+  };
 }
 
-function _hideTooltip() {
-  const tip = document.getElementById('hm-tooltip');
-  if (tip) tip.style.display = 'none';
-}
+// ── Render ───────────────────────────────────────────────────────────────
 
-/**
- * Map a normalised score [0, 1] to a CSS color string.
- * 0 → blue, 0.5 → light green, 0.75 → yellow, 1 → red
- */
-function _scoreToColor(score) {
-  const stops = [
-    [0.00, [49, 54, 149]],   // strong negative deviation: blue
-    [0.25, [0, 166, 81]],    // mild negative: green
-    [0.50, [166, 217, 106]], // normal: light green
-    [0.75, [255, 235, 59]],  // mild positive: yellow
-    [1.00, [215, 48, 39]],   // strong positive deviation: red
-  ];
-  const s = Math.max(0, Math.min(1, score));
-  for (let i = 1; i < stops.length; i++) {
-    if (s <= stops[i][0]) {
-      const [a, ca] = stops[i - 1];
-      const [b, cb] = stops[i];
-      const t = (s - a) / (b - a);
-      const rgb = ca.map((v, j) => Math.round(v + t * (cb[j] - v)));
-      return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+function render() {
+  const nCols = data.t.length;
+  const nRows = data.entity_ids.length;
+  const ctx = canvas.getContext("2d");
+  const { cssWidth, gutter, plotWidth } = getPlotGeometry();
+
+  // Match canvas size to CSS layout
+  if (cssWidth > 0 && canvas.style.width !== cssWidth + "px") {
+    canvas.style.width = cssWidth + "px";
+    document.getElementById("heatmap-xaxis")?.style.setProperty("width", cssWidth + "px");
+  }
+
+  const cssHeight = canvas.offsetHeight || 160;
+  if (canvas.width !== cssWidth) canvas.width = cssWidth;
+  if (canvas.height !== cssHeight) canvas.height = cssHeight;
+
+  const cellHeight = Math.max(1, cssHeight / nRows);
+  const plotRight = gutter + plotWidth;
+
+  ctx.clearRect(0, 0, cssWidth, cssHeight);
+
+  // Pre-compute column pixel spans
+  const spans = Array.from({ length: nCols }, (_, c) =>
+    columnSpan(c, { gutter, plotWidth })
+  );
+
+  // Draw cells
+  for (let row = 0; row < nRows; row++) {
+    for (let col = 0; col < nCols; col++) {
+      const span = spans[col];
+      const x0 = Math.max(gutter, Math.round(span.x0));
+      const x1 = Math.min(plotRight, Math.round(span.x1));
+      if (x1 <= x0) continue;
+
+      const score = data.scores[row]?.[col];
+      ctx.fillStyle = score == null ? "rgb(125,125,125)" : scoreToColor(score);
+      ctx.fillRect(x0, Math.round(row * cellHeight), x1 - x0, Math.ceil(cellHeight));
     }
   }
-  return 'rgb(215,48,39)';
+
+  // Draw hover highlight
+  if (hover.col >= 0 && hover.col < nCols) {
+    const span = spans[hover.col];
+    const x0 = Math.max(gutter, Math.round(span.x0));
+    const x1 = Math.min(plotRight, Math.round(span.x1));
+    if (x1 > x0) {
+      ctx.fillStyle = "rgba(255,255,255,0.18)";
+      ctx.fillRect(x0, 0, x1 - x0, cssHeight);
+    }
+  }
+
+  renderYAxis(data.entity_ids, nRows, cssHeight, cellHeight);
+  renderXAxis(data.t, nCols, cssWidth, spans);
+  lastPaintedKey = geometryKey();
 }
 
-function _renderYAxis(entityIds, nRows, cssH, cellH) {
-  const yaxis = document.getElementById('heatmap-yaxis');
-  if (!yaxis) return;
-  yaxis.innerHTML = '';
-  yaxis.style.height = cssH + 'px';
+// ── Color scale ──────────────────────────────────────────────────────────
+
+function scoreToColor(score) {
+  const stops = [
+    [0.00, [49, 54, 149]],    // blue (negative)
+    [0.25, [0, 166, 81]],     // green (mild negative)
+    [0.50, [166, 217, 106]],  // light green (normal)
+    [0.75, [255, 235, 59]],   // yellow (mild positive)
+    [1.00, [215, 48, 39]],    // red (positive)
+  ];
+
+  const s = Math.max(0, Math.min(1, score));
+
+  for (let i = 1; i < stops.length; i++) {
+    if (s <= stops[i][0]) {
+      const [prevPos, prevColor] = stops[i - 1];
+      const [nextPos, nextColor] = stops[i];
+      const t = (s - prevPos) / (nextPos - prevPos);
+      const r = Math.round(prevColor[0] + t * (nextColor[0] - prevColor[0]));
+      const g = Math.round(prevColor[1] + t * (nextColor[1] - prevColor[1]));
+      const b = Math.round(prevColor[2] + t * (nextColor[2] - prevColor[2]));
+      return `rgb(${r},${g},${b})`;
+    }
+  }
+
+  return "rgb(215,48,39)";
+}
+
+// ── Mouse interaction ────────────────────────────────────────────────────
+
+function handleMouseMove(e) {
+  if (!data) return;
+
+  const col = columnAtX(e.offsetX);
+  const cssHeight = canvas.offsetHeight || 160;
+  const cellHeight = cssHeight / data.entity_ids.length;
+  const row = Math.min(
+    data.entity_ids.length - 1,
+    Math.floor(e.offsetY / cellHeight)
+  );
+
+  if (col !== hover.col) {
+    hover = { col, row };
+    render();
+  } else {
+    hover.row = row;
+  }
+
+  showTooltip(e, col, row);
+  onHover?.(col >= 0 ? data.t[col] : null);
+}
+
+function columnAtX(x) {
+  if (!data?.t.length) return -1;
+  const time = timeAtX(x);
+  return time == null ? -1 : findNearestColumn(time);
+}
+
+function timeAtX(x) {
+  if (!data) return null;
+
+  const geometry = getPlotGeometry();
+
+  if (mainPlot) {
+    const time = mainPlot.posToVal(x - geometry.gutter, "x");
+    if (isFinite(time)) return time;
+  }
+
+  const range = dataRange();
+  if (range && range.t1 > range.t0 && x >= geometry.gutter) {
+    return range.t0 + ((x - geometry.gutter) / geometry.plotWidth) * (range.t1 - range.t0);
+  }
+
+  return null;
+}
+
+// ── Tooltip ──────────────────────────────────────────────────────────────
+
+function showTooltip(e, col, row) {
+  const tip = document.getElementById("hm-tooltip");
+  if (!tip || col < 0 || row < 0 || !data?.t?.[col]) {
+    hideTooltip();
+    return;
+  }
+
+  const score = data.scores?.[row]?.[col];
+  const entityId = data.entity_ids[row];
+  const name = nameMap[entityId] || `ch ${entityId}`;
+  const timeStr = new Date(data.t[col] * 1000).toLocaleString();
+
+  let html = `<b>${name}</b> · ${timeStr}<br>`;
+
+  if (score == null) {
+    html += '<span class="hm-missing">no sample</span>';
+  } else {
+    const zScore = (score * 6 - 3).toFixed(2);
+    html += `z-score <b>${zScore}</b>`;
+  }
+
+  if (tooltipExtra) {
+    const extra = tooltipExtra(data.t[col]);
+    if (extra) html += `<div class="hm-extra">${extra}</div>`;
+  }
+
+  tip.innerHTML = html;
+  tip.style.display = "block";
+  tip.style.left = Math.min(innerWidth - 260, e.clientX + 14) + "px";
+  tip.style.top = Math.min(innerHeight - 90, e.clientY + 14) + "px";
+}
+
+function hideTooltip() {
+  const tip = document.getElementById("hm-tooltip");
+  if (tip) tip.style.display = "none";
+}
+
+// ── Axis labels ──────────────────────────────────────────────────────────
+
+function renderYAxis(entityIds, nRows, cssHeight, cellHeight) {
+  const el = document.getElementById("heatmap-yaxis");
+  if (!el) return;
+
+  el.innerHTML = "";
+  el.style.height = cssHeight + "px";
 
   // Only label every Nth row so they don't overlap
-  const labelH  = 12;                         // px per label minimum
-  const step    = Math.max(1, Math.ceil(labelH / cellH));
+  const minLabelHeight = 12;
+  const step = Math.max(1, Math.ceil(minLabelHeight / cellHeight));
 
   for (let r = 0; r < nRows; r += step) {
-    const cid   = entityIds[r];
-    const label = document.createElement('div');
-    label.className = 'hm-label';
-    label.style.top = Math.round(r * cellH + cellH / 2) + 'px';
-    const name = _nameMap[cid];
-    label.textContent = name || `ch ${cid}`;
-    label.title = `entity ${cid}`;
-    yaxis.appendChild(label);
+    const label = document.createElement("div");
+    label.className = "hm-label";
+    label.style.top = Math.round(r * cellHeight + cellHeight / 2) + "px";
+
+    const entityId = entityIds[r];
+    label.textContent = nameMap[entityId] || `ch ${entityId}`;
+
+    el.appendChild(label);
   }
 }
 
-function _renderXAxis(tArr, nCols, cssW, gut, plotW, spans) {
-  const xaxis = document.getElementById('heatmap-xaxis');
-  if (!xaxis) return;
-  xaxis.innerHTML = '';
-  xaxis.style.width = cssW + 'px';
+function renderXAxis(timeArray, nCols, cssWidth, spans) {
+  const el = document.getElementById("heatmap-xaxis");
+  if (!el) return;
 
-  const t0 = tArr[0], t1 = tArr[nCols - 1];
-  const span = t1 - t0;
-  const nLabels = Math.max(2, Math.min(6, Math.floor(cssW / 130)));
-  for (let i = 0; i < nLabels; i++) {
-    const f  = i / (nLabels - 1);
-    const ts = t0 + span * f;
-    const col = Math.min(nCols - 1, Math.round(f * (nCols - 1)));
-    const label = document.createElement('div');
-    label.className = 'hm-xlabel';
-    // Position by the column's true pixel span (time-mapped) so labels stay
-    // glued to the data even while the chart is zoomed.
-    const s = spans[col];
-    label.style.left = Math.round((s.x0 + s.x1) / 2) + 'px';
-    label.textContent = new Date(ts * 1000).toLocaleString();
-    xaxis.appendChild(label);
+  el.innerHTML = "";
+  el.style.width = cssWidth + "px";
+
+  const maxLabels = Math.max(2, Math.min(6, Math.floor(cssWidth / 130)));
+
+  for (let i = 0; i < maxLabels; i++) {
+    const fraction = i / (maxLabels - 1);
+    const col = Math.min(nCols - 1, Math.round(fraction * (nCols - 1)));
+    const span = spans[col];
+
+    const label = document.createElement("div");
+    label.className = "hm-xlabel";
+    label.style.left = Math.round((span.x0 + span.x1) / 2) + "px";
+    label.textContent = new Date(timeArray[col] * 1000).toLocaleString();
+
+    el.appendChild(label);
   }
 }
 
-function _clearYAxis() {
-  const yaxis = document.getElementById('heatmap-yaxis');
-  if (yaxis) yaxis.innerHTML = '';
+function clearAxis(elementId) {
+  const el = document.getElementById(elementId);
+  if (el) el.innerHTML = "";
 }
 
-function _clearXAxis() {
-  const xaxis = document.getElementById('heatmap-xaxis');
-  if (xaxis) xaxis.innerHTML = '';
-  if (_canvas) {
-    const ctx = _canvas.getContext('2d');
-    ctx.clearRect(0, 0, _canvas.width, _canvas.height);
-  }
+// ── Drag resizer ─────────────────────────────────────────────────────────
+
+function setupDragResizer() {
+  const resizer = document.getElementById("heatmap-resizer");
+  if (!resizer) return;
+
+  resizer.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    resizer.classList.add("active");
+
+    const startY = e.clientY;
+    const startHeight = canvas.parentElement.getBoundingClientRect().height;
+
+    const onMouseMove = (ev) => {
+      const newHeight = Math.min(Math.max(startHeight + (startY - ev.clientY), 48), 520);
+      canvas.parentElement.style.height = newHeight + "px";
+      localStorage.setItem("hmHeight", String(Math.round(newHeight)));
+      redrawHeatmap();
+    };
+
+    const onMouseUp = () => {
+      removeEventListener("mousemove", onMouseMove);
+      removeEventListener("mouseup", onMouseUp);
+      resizer.classList.remove("active");
+    };
+
+    addEventListener("mousemove", onMouseMove);
+    addEventListener("mouseup", onMouseUp);
+  });
+
+  // Double-click to auto-size
+  resizer.addEventListener("dblclick", () => {
+    localStorage.removeItem("hmHeight");
+    if (data) {
+      sizeToRowCount(data.entity_ids.length);
+      redrawHeatmap();
+    }
+  });
 }

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Time-series Evidence Explorer</title>
+<title>Time-series Explorer</title>
 <link rel="icon" href="static/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="https://unpkg.com/uplot@1.6.30/dist/uPlot.min.css">
 <link rel="stylesheet" href="static/style.css">
@@ -13,102 +13,54 @@
   <h1>TIME-SERIES EXPLORER</h1>
   <span class="stats" id="stats">-</span>
 </header>
-
 <div id="layout">
-  <!-- ── Sidebar ─────────────────────────────────────────── -->
   <div id="sidebar">
     <div id="daterange">
       <div class="dr-row"><span class="dr-label">From</span><input type="datetime-local" id="dt0"></div>
       <div class="dr-row"><span class="dr-label">To</span><input type="datetime-local" id="dt1"></div>
       <button id="applyRange">Go</button>
       <button id="clearCache" class="secondary">Clear Cache</button>
-
-      <div class="algo-row">
-        <label>Downsample</label>
-        <select id="algo">
-          <option value="M4" selected>M4 (default)</option>
-          <option value="LTTB">LTTB</option>
-          <option value="MINMAXLTTB">MinMaxLTTB</option>
-          <option value="RAW">Raw</option>
-        </select>
+      <div class="algo-row"><label>Downsample</label>
+        <select id="algo"><option value="M4" selected>M4</option><option value="LTTB">LTTB</option><option value="MINMAXLTTB">MinMaxLTTB</option><option value="RAW">Raw</option></select>
       </div>
-
-      <label class="toggle-row">
-        <input type="checkbox" id="perAxis">
-        <span>Per-entity Y axes</span>
-      </label>
-      <label class="toggle-row">
-        <input type="checkbox" id="showHeatmap">
-        <span>Entity heatmap</span>
-      </label>
-      <label class="toggle-row">
-        <input type="checkbox" id="showHist">
-        <span>Value histograms</span>
-      </label>
-      <label class="toggle-row hist-bin-control">
-        <span>Histogram bins</span>
-        <input type="number" id="histBins" min="4" max="100" step="1" value="24">
-      </label>
+      <div class="algo-row"><label>Interpolation</label>
+        <select id="interpMode"><option value="linear" selected>Linear</option><option value="step">Step / Deadband</option></select>
+      </div>
+      <label class="toggle-row"><input type="checkbox" id="perAxis"><span>Per-entity Y axes</span></label>
+      <label class="toggle-row"><input type="checkbox" id="showHeatmap"><span>Entity heatmap</span></label>
+      <label class="toggle-row"><input type="checkbox" id="showHist"><span>Value histograms</span></label>
+      <label class="toggle-row hist-bin-control"><span>Histogram bins</span><input type="number" id="histBins" min="4" max="100" step="1" value="24"></label>
     </div>
-
     <details class="ds-panel" id="dsPanel">
       <summary>Data sources</summary>
-      <label class="ds-label">Active dataset</label>
-      <select id="datasetSelect"></select>
+      <label class="ds-label">Active dataset</label><select id="datasetSelect"></select>
       <label class="ds-label">Register a config.json</label>
-      <textarea id="configJson" rows="9" spellcheck="false"
-        placeholder='{ "version": 1, "dataset": { "id": "my-source", "label": "My source" }, "source": { "type": "http", "base_url": "http://host:9000" }, "endpoints": { "entities": { "path": "/entities" }, "extent": { "path": "/extent" }, "series": { "path": "/series" } }, "mapping": { "entity_id": "id", "timestamp": "ts", "measures": { "value": {} } } }'></textarea>
+      <textarea id="configJson" rows="9" spellcheck="false" placeholder='{"version":1,"dataset":{"id":"src","label":"Source"},"source":{"type":"http","base_url":"http://host:9000"},"endpoints":{"entities":{"path":"/entities"},"extent":{"path":"/extent"},"series":{"path":"/series"}},"mapping":{"entity_id":"id","timestamp":"ts","measures":{"value":{}}}}'></textarea>
       <button id="registerConfig">Register</button>
       <div id="configList" class="config-list"></div>
     </details>
-
     <input type="text" id="filter" placeholder="filter entities…">
     <div class="help">Select entities · set date range · click Go</div>
     <div id="entitylist"></div>
   </div>
-
-  <!-- ── Main area ───────────────────────────────────────── -->
   <div id="main">
     <div class="legend" id="legend">Select entities + date range, then click Go</div>
-
-    <!-- Primary chart -->
     <div id="chartwrap"><div id="chart"></div></div>
-
-    <!-- Cross-entity heatmap -->
     <div id="heatmapwrap" style="display:none">
-      <div id="heatmap-resizer" title="Drag to resize heatmap · double-click to auto-size"></div>
-      <div class="panel-label">Temporal z-score Heatmap
-        <span class="panel-hint">(blue negative · green near normal · yellow elevated · red high · gray missing)</span>
-        <span class="panel-state" id="heatmapstate"></span>
-        <span class="hm-legend">
-          <span class="hm-legend-label">z −3</span>
-          <span class="hm-legend-bar"></span>
-          <span class="hm-legend-label">z 0</span>
-          <span class="hm-legend-label">z +3</span>
-          <span class="hm-legend-missing">missing</span>
-        </span>
+      <div id="heatmap-resizer" title="Drag to resize"></div>
+      <div class="panel-label">Temporal z-score Heatmap <span class="panel-hint">(blue neg · green normal · red high · gray missing)</span><span class="panel-state" id="heatmapstate"></span>
+        <span class="hm-legend"><span class="hm-legend-label">z −3</span><span class="hm-legend-bar"></span><span class="hm-legend-label">z 0</span><span class="hm-legend-label">z +3</span><span class="hm-legend-missing">missing</span></span>
       </div>
-      <div id="heatmap-plot">
-        <canvas id="heatmap"></canvas>
-        <div id="heatmap-xaxis"></div>
-        <div id="heatmap-yaxis"></div>
-      </div>
+      <div id="heatmap-plot"><canvas id="heatmap"></canvas><div id="heatmap-xaxis"></div><div id="heatmap-yaxis"></div></div>
       <div id="hm-tooltip"></div>
     </div>
-
-    <!-- Per-entity value histograms -->
     <div id="histwrap" style="display:none">
-      <div class="panel-label">Value Histograms
-        <span class="panel-hint">(exact served nodes in the current range · interpolated values excluded · drag handles to resize)</span>
-      </div>
-      <div id="hists"></div>
-      <div id="hist-tooltip"></div>
+      <div class="panel-label">Value Histograms <span class="panel-hint">(observed values · drag to resize)</span></div>
+      <div id="hists"></div><div id="hist-tooltip"></div>
     </div>
   </div>
 </div>
-
 <div id="tooltip"></div>
-
-<script type="module" src="static/app.js"></script>
+<script type="module" src="static/app.js?v=3"></script>
 </body>
 </html>

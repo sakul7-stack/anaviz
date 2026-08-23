@@ -24,9 +24,11 @@ anaviz/          the visualization PROJECT — standalone (compose project: anav
   docker-compose.yml  external cache volume + shared net; app :8000, cache DB :5433
   Dockerfile     project image (context ./anaviz); entrypoint.sh; pyproject.toml
   Makefile       per-project targets (up/down/logs/psql/test)
-  server/        FastAPI composition (`app.py`) + routes/composition only
-  server/api/    canonical contracts, config model, configurable HTTP adapter
-  server/downsample/ M4, LTTB, MinMaxLTTB downsampling + rollup tiers (rollup.py)
+  server/        FastAPI composition (`app.py`) + entry point
+  server/api/    canonical contracts, config model (Pydantic validation)
+  server/adapter/   HTTP adapter, cache, query execution
+  server/adapter/sql/  named SQL constants + schema DDL
+  server/adapter/downsample/ M4, LTTB, MinMaxLTTB + rollup tiers
   frontend/      Vanilla JS + uPlot/Canvas renderers consuming canonical APIs
   configs/       user-supplied *.json dataset configs; intentionally EMPTY in
                  the repo — nothing is preloaded. Register via the UI or
@@ -97,15 +99,15 @@ integration suite when the stack is up.
   compatibility facades over the default adapter while new visualization
   behavior uses `/api/datasets/*`, `/api/configs`, and `POST /api/query`.
 - Keep HTTP fetching, cache SQL, rollup/downsampling decisions, coverage math,
-  the no-data-loss SQL bucket aggregation (`read_bucketed`), and provenance
-  generation in `server/api/configurable.py`; `server/app.py` contains
-  composition and routes only.
+  the no-data-loss SQL bucket aggregation, and provenance generation in
+  `server/adapter/`; SQL constants live in `server/adapter/sql/queries.py`;
+  `server/api/app.py` contains composition and routes only.
 - Never truncate a visualization: dense raw ranges (more cached rows than
   `row_cap`) are aggregated in Postgres over ALL rows into time buckets sized
   to the pixel budget (exact first/min/max/last per bucket), never cut off at
   the cap. The response marks `aggregated` + `query_aggregated`.
-- Reuse the downsample modules and `server/api/common.py` helpers already
-  present; don't re-implement them.
+- Reuse the `server/adapter/downsample/` modules and `server/adapter/common.py`
+  helpers already present; don't re-implement them.
 - Data pipeline must be resumable: any interrupted ingestion/download can be
   re-run without corrupting the DB. `anaviz_datasource/download_hlt.py`
   resumes via HTTP Range; `anaviz_datasource/ingest_hlt.py` uses `ON CONFLICT`
@@ -135,8 +137,8 @@ config ships with the repo.
 ## Gotchas
 
 - The generic cache tables (`cache_series`, `cache_coverage`, `cache_rollup`)
-  are created by `db/cache_schema.sql` on first boot AND by
-  `GenericDatasetCache.ensure_tables` at app startup. They are shared by every
+  are created by `server/adapter/sql/schema.sql` on first boot AND by
+  `GenericCache.ensure_tables` at app startup. They are shared by every
   dataset; isolation is by `dataset_key = "<dataset_id>:<config_fingerprint>"`.
   `cache_rollup` holds opt-in bucket tiers (first/min/max/last/avg/count)
   aggregated from raw rows at hydration time. Rollups are strictly opt-in:

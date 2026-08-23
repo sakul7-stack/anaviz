@@ -15,8 +15,6 @@ except ImportError:
 @dataclass(frozen=True)
 class Settings:
     db_url: str = "postgresql://dcs:dcs@localhost:5433/dcs"
-    # Directory of *.json dataset configs loaded at startup; also the
-    # directory the frontend's Data Sources panel persists configs to.
     config_dir: Path = Path(__file__).resolve().parent.parent / "configs"
 
     @property
