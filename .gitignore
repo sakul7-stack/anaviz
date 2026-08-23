@@ -31,6 +31,7 @@ Thumbs.db
 
 # Demo/presentation material
 docs/demo/
+AGENTS.md
 
 # IDE
 .vscode/
