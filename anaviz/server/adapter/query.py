@@ -16,7 +16,7 @@ from ..api.contracts import (
     QueryMetrics, QueryProvenance, SeriesPoints, SeriesQuery, SeriesQueryResponse,
 )
 
-# ── Helpers ───────────────────────────────────────────────────────────────
+# Helpers
 
 _r6 = lambda arr: np.round(arr, 6).tolist()
 
@@ -55,7 +55,7 @@ def _quality_flag(raw, quality_map: dict[str, str] | None) -> int:
     return coerce_quality(raw)
 
 
-# ── Data extraction ───────────────────────────────────────────────────────
+# Data extraction
 
 def extract_rows(data: dict, config, measure_id: str
                  ) -> list[tuple[datetime, float | None, int]]:
@@ -102,7 +102,7 @@ def extract_rows(data: dict, config, measure_id: str
     return rows
 
 
-# ── Series query ──────────────────────────────────────────────────────────
+# Series query
 
 async def run_query(adapter, request: SeriesQuery) -> SeriesQueryResponse:
     from .adapter import ConfigurableAdapter  # avoid circular
@@ -178,7 +178,7 @@ def _empty_series(adapter, eid, mid, spec, src_ms, t0, truncated=False, resoluti
                              source_ms=round(src_ms, 1), truncated=truncated))
 
 
-# ── Raw series ────────────────────────────────────────────────────────────
+# Raw series
 
 async def _raw_series(adapter, eid, mid, spec, start, end, budget, algo, src_ms, t0):
     cache = adapter.cache
@@ -220,7 +220,7 @@ async def _raw_series(adapter, eid, mid, spec, start, end, budget, algo, src_ms,
                              downsample_ms=round(ds_ms, 2), truncated=truncated))
 
 
-# ── Bucketed series ───────────────────────────────────────────────────────
+# Bucketed series
 
 def _serve_bucketed(adapter, data, bkt_s, eid, mid, spec, algo, budget,
                     src_ms, t0, *, query_aggregated=False, truncated=None, rows_source=None):
@@ -256,7 +256,7 @@ def _serve_bucketed(adapter, data, bkt_s, eid, mid, spec, algo, budget,
                              truncated=truncated))
 
 
-# ── Rollup series ─────────────────────────────────────────────────────────
+# Rollup series
 
 async def _rollup_series(adapter, eid, mid, spec, start, end, bkt_s, budget, algo, src_ms, t0):
     cache = adapter.cache
@@ -284,7 +284,7 @@ async def _rollup_series(adapter, eid, mid, spec, start, end, bkt_s, budget, alg
                            query_aggregated=False, truncated=truncated)
 
 
-# ── Matrix (heatmap) ──────────────────────────────────────────────────────
+# Matrix (heatmap)
 
 async def run_matrix(adapter, request: MatrixQuery) -> MatrixResult:
     if request.measure_id not in adapter.config.mapping.measures:
@@ -329,7 +329,7 @@ async def run_matrix(adapter, request: MatrixQuery) -> MatrixResult:
                         fidelity={"cache_namespace": adapter.dataset_key})
 
 
-# ── Shared helpers ────────────────────────────────────────────────────────
+# Shared helpers
 
 def _quality_summary(q: np.ndarray) -> dict[str, int]:
     return {str(int(f)): int(np.count_nonzero(q == f)) for f in np.unique(q)}

@@ -18,8 +18,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-# ── Sub-models ────────────────────────────────────────────────────────────────
-
+# Sub-models
 
 class DatasetInfo(BaseModel):
     id: str = Field(pattern=r"^[a-zA-Z0-9_-]{1,64}$")
@@ -127,7 +126,7 @@ class Endpoints(BaseModel):
     series: SeriesEndpoint
 
 
-# ── Top-level configuration ───────────────────────────────────────────────────
+# Top-level configuration
 
 DEFAULT_CAPABILITIES = [
     "entities", "extent", "series", "coverage", "quality",
@@ -172,7 +171,7 @@ class DatasetConfig(BaseModel):
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
-# ── Env substitution and loading ──────────────────────────────────────────────
+# Env substitution and loading
 
 _ENV_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 

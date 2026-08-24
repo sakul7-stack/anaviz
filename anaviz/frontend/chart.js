@@ -10,7 +10,7 @@
  */
 import { $, COLORS, MAX_SERIES, nearestIndex } from "./utils.js";
 
-// ── State ────────────────────────────────────────────────────────────────
+// State
 
 export let plot = null;           // current uPlot instance
 export let lastRenderData = null; // data from the last chartUpdate call
@@ -21,7 +21,7 @@ let hoverSyncCallback = null;  // chart hover → heatmap callback
 let chartDrawCallback = null;  // called after every chart redraw
 let tooltipEnricher = null;    // extra tooltip HTML per entity
 
-// ── Public API ───────────────────────────────────────────────────────────
+// Public API
 
 export function destroyPlot() {
   if (plot) {
@@ -111,7 +111,7 @@ export function getValuesAtTime(time) {
   return { t: data.data[0][index], values, selected: data.selected };
 }
 
-// ── Chart init ───────────────────────────────────────────────────────────
+// Chart init
 
 export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, interpMode) {
   const wrap = document.getElementById("chart");
@@ -146,8 +146,7 @@ export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, int
     return cfg;
   }
 
-  // ── Build series + axes for each entity ──────────────────────────────
-
+  // Build series + axes for each entity
   if (perEntityAxes) {
     // Each entity gets its own y-axis
     scales = { x: xScale };
@@ -200,8 +199,7 @@ export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, int
     scales = { x: xScale };
   }
 
-  // ── Draw hook: sync cursor + trigger redraw callback ─────────────────
-
+  // Draw hook: sync cursor + trigger redraw callback
   const drawHook = (u) => {
     if (syncCursorTime == null) return;
 
@@ -221,8 +219,7 @@ export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, int
     ctx.restore();
   };
 
-  // ── Create uPlot ────────────────────────────────────────────────────
-
+  // Create uPlot
   try {
     plot = new uPlot(
       {
@@ -250,7 +247,7 @@ export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, int
   setupTooltip(plot);
 }
 
-// ── Tooltip ──────────────────────────────────────────────────────────────
+// Tooltip
 
 function setupTooltip(chart) {
   const tip = $("#tooltip");
@@ -316,7 +313,7 @@ function setupTooltip(chart) {
   });
 }
 
-// ── Chart update ─────────────────────────────────────────────────────────
+// Chart update
 
 /**
  * Update the chart with new data. Rebuilds if the series count changed,
@@ -361,7 +358,7 @@ export function chartUpdate(data, selected, onNav, perEntityAxes, bandByEntity, 
   }
 }
 
-// ── Legend ────────────────────────────────────────────────────────────────
+// Legend
 
 export function buildLegend(selected) {
   const el = $("#legend");
@@ -388,7 +385,7 @@ export function buildLegend(selected) {
   });
 }
 
-// ── Auto-resize ──────────────────────────────────────────────────────────
+// Auto-resize
 
 let resizeObserver = null;
 
@@ -422,7 +419,7 @@ export function watchChartResize() {
   resizeObserver.observe(wrap);
 }
 
-// ── Pan / zoom interactions ──────────────────────────────────────────────
+// Pan / zoom interactions
 
 function attachInteractions(chart, onNav) {
   // Scroll wheel → zoom in/out

@@ -18,7 +18,7 @@
  */
 import { plot as mainPlot, getPlotGeometry, xForTime } from "./chart.js";
 
-// ── State ────────────────────────────────────────────────────────────────
+// State
 
 let canvas = null;
 let data = null;       // current heatmap data
@@ -30,7 +30,7 @@ let hover = { col: -1, row: -1 };
 let rafId = null;      // requestAnimationFrame handle
 let lastPaintedKey = null; // geometry key of last paint (skip no-op repaints)
 
-// ── Public API ───────────────────────────────────────────────────────────
+// Public API
 
 /**
  * Initialize the heatmap. Call once on page load.
@@ -122,7 +122,7 @@ export function highlightColumn(time) {
   render();
 }
 
-// ── Geometry helpers ─────────────────────────────────────────────────────
+// Geometry helpers
 
 function geometryKey() {
   const geo = getPlotGeometry();
@@ -182,7 +182,7 @@ function columnSpan(index, geometry) {
   };
 }
 
-// ── Render ───────────────────────────────────────────────────────────────
+// Render
 
 function render() {
   const nCols = data.t.length;
@@ -240,7 +240,7 @@ function render() {
   lastPaintedKey = geometryKey();
 }
 
-// ── Color scale ──────────────────────────────────────────────────────────
+// Color scale
 
 function scoreToColor(score) {
   const stops = [
@@ -268,7 +268,7 @@ function scoreToColor(score) {
   return "rgb(215,48,39)";
 }
 
-// ── Mouse interaction ────────────────────────────────────────────────────
+// Mouse interaction
 
 function handleMouseMove(e) {
   if (!data) return;
@@ -316,7 +316,7 @@ function timeAtX(x) {
   return null;
 }
 
-// ── Tooltip ──────────────────────────────────────────────────────────────
+// Tooltip
 
 function showTooltip(e, col, row) {
   const tip = document.getElementById("hm-tooltip");
@@ -355,7 +355,7 @@ function hideTooltip() {
   if (tip) tip.style.display = "none";
 }
 
-// ── Axis labels ──────────────────────────────────────────────────────────
+// Axis labels
 
 function renderYAxis(entityIds, nRows, cssHeight, cellHeight) {
   const el = document.getElementById("heatmap-yaxis");
@@ -408,7 +408,7 @@ function clearAxis(elementId) {
   if (el) el.innerHTML = "";
 }
 
-// ── Drag resizer ─────────────────────────────────────────────────────────
+// Drag resizer
 
 function setupDragResizer() {
   const resizer = document.getElementById("heatmap-resizer");

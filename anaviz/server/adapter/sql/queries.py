@@ -1,6 +1,6 @@
 """Named SQL constants. All cache queries live here, not in Python code."""
 
-# ── Coverage ──────────────────────────────────────────────────────────────
+# Coverage
 
 COVERAGE = """
 SELECT t_min, t_max FROM cache_coverage
@@ -15,7 +15,7 @@ VALUES (%s, %s, %s, %s, %s, %s)
 ON CONFLICT DO NOTHING
 """
 
-# ── Series store ──────────────────────────────────────────────────────────
+# Series store
 
 STORE_SERIES = """
 INSERT INTO cache_series
@@ -24,7 +24,7 @@ SELECT %s, %s, %s, ts, value, quality FROM _cs
 ON CONFLICT DO NOTHING
 """
 
-# ── Series read ───────────────────────────────────────────────────────────
+# Series read
 
 COUNT = """
 SELECT count(*) FROM cache_series
@@ -70,7 +70,7 @@ FROM (
 GROUP BY idx ORDER BY idx LIMIT %s
 """
 
-# ── Rollup ────────────────────────────────────────────────────────────────
+# Rollup
 
 UPSERT_ROLLUP = """
 INSERT INTO cache_rollup
@@ -119,7 +119,7 @@ WHERE dataset_key = %s AND entity_id = %s AND measure_id = %s
 ORDER BY bucket_start LIMIT %s
 """
 
-# ── Cleanup ───────────────────────────────────────────────────────────────
+# Cleanup
 
 DROP_SERIES   = "DELETE FROM cache_series   WHERE dataset_key = %s"
 DROP_COVERAGE = "DELETE FROM cache_coverage WHERE dataset_key = %s"

@@ -23,7 +23,7 @@ from server.downsample.rollup import (
 from tests.test_configurable import FakeCache
 
 
-# ── Tier selection ───────────────────────────────────────────────────────────
+# Tier selection
 
 def test_select_tier_without_levels_always_raw():
     # Tiers are strictly opt-in: no levels means no rollup, ever.
@@ -60,7 +60,7 @@ def test_tier_name_human_labels():
     assert tier_name(4096) == "1h8m16s"
 
 
-# ── Bucket aggregation ───────────────────────────────────────────────────────
+# Bucket aggregation
 
 def test_aggregate_buckets_stats():
     t = np.array([0, 1, 2, 3, 10, 11, 20], dtype=float)
@@ -112,7 +112,7 @@ def test_bucket_rows_to_arrays_roundtrip():
     assert empty.total == 0 and len(empty.t) == 0
 
 
-# ── Adapter rollup query path ────────────────────────────────────────────────
+# Adapter rollup query path
 
 DENSE_EXTENT = {"t_min": 0.0, "t_max": 36000.0}
 
@@ -444,7 +444,7 @@ def test_rollup_can_be_disabled_per_dataset():
     assert result.resolution == "raw"
 
 
-# ── No-data-loss dense raw ranges ──────────────────────────────────────────
+# No-data-loss dense raw ranges
 
 def test_query_dense_raw_range_never_truncates():
     """A raw-mode range denser than row_cap must be aggregated in the DB over

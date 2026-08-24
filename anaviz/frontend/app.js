@@ -35,7 +35,7 @@ import {
   setHistogramHover, clearHistogramHover, binInfoLine,
 } from "./histogram.js";
 
-// ── Application state ────────────────────────────────────────────────────
+// Application state
 
 let entities = [];           // all entities from the current dataset
 let selected = [];           // currently selected entities
@@ -52,7 +52,7 @@ const getHistogramBinCount = () =>
   Math.min(100, Math.max(4, Math.round(Number($("#histBins")?.value) || 24)));
 const getInterpolationMode = () => $("#interpMode")?.value || "linear";
 
-// ── Dataset loading ──────────────────────────────────────────────────────
+// Dataset loading
 
 async function loadDataset(id) {
   try {
@@ -154,7 +154,7 @@ function showEmptyState() {
   $("#stats").textContent = "no data source";
 }
 
-// ── Config list ──────────────────────────────────────────────────────────
+// Config list
 
 function renderConfigList(configs) {
   const list = $("#configList");
@@ -187,7 +187,7 @@ function renderConfigList(configs) {
   });
 }
 
-// ── Entity list ──────────────────────────────────────────────────────────
+// Entity list
 
 function renderEntityList(filter) {
   const list = $("#entitylist");
@@ -228,7 +228,7 @@ async function toggleEntity(entity) {
   buildLegend(selected);
 }
 
-// ── Navigation ───────────────────────────────────────────────────────────
+// Navigation
 
 let navTimer = null;
 let navBurst = false;        // true while user is actively scrolling/zooming
@@ -289,7 +289,7 @@ function navigateTo(start, end) {
   }, 180);
 }
 
-// ── Data assembly ────────────────────────────────────────────────────────
+// Data assembly
 
 /**
  * Transform API results into the format the chart renderer expects.
@@ -406,7 +406,7 @@ function renderHistogramPanel(hasData) {
   }
 }
 
-// ── Main fetch ───────────────────────────────────────────────────────────
+// Main fetch
 
 async function fetchData() {
   if (!selected.length || view.t0 === null) return;
@@ -504,7 +504,7 @@ async function fetchData() {
   }
 }
 
-// ── Event handlers ───────────────────────────────────────────────────────
+// Event handlers
 
 $("#clearCache").onclick = async () => {
   if (!confirm("Clear all cached data?")) return;
@@ -652,7 +652,7 @@ window.addEventListener("resize", () => {
   if (selected.length && view.t0) fetchData();
 });
 
-// ── Heatmap → chart tooltip info ─────────────────────────────────────────
+// Heatmap → chart tooltip info
 
 function graphInfoAt(time) {
   const got = getValuesAtTime(time);
@@ -673,7 +673,7 @@ function graphInfoAt(time) {
   return html + "</div>";
 }
 
-// ── Initialize ───────────────────────────────────────────────────────────
+// Initialize
 
 initHeatmap(document.getElementById("heatmap"), {
   onSeek: seekTo,

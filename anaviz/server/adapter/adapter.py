@@ -79,8 +79,7 @@ class ConfigurableAdapter:
             await self._client.aclose()
             self._client = None
 
-    # ── describe ─────────────────────────────────────────────────────────
-
+    # describe
     async def describe(self) -> DatasetSchema:
         measures = [
             MeasureSchema(id=mid, label=s.label or mid, type=s.type, unit=s.unit)
@@ -91,8 +90,7 @@ class ConfigurableAdapter:
             description=self.config.dataset.description,
             measures=measures, capabilities=list(self.config.capabilities))
 
-    # ── entities ─────────────────────────────────────────────────────────
-
+    # entities
     async def entities(self, search=None, offset=0, limit=100) -> EntityPage:
         resp = await self._http().get(self.config.endpoints.entities.path)
         resp.raise_for_status()
@@ -125,8 +123,7 @@ class ConfigurableAdapter:
         return EntityPage(items=records[offset:offset+limit],
                           total=len(records), offset=offset, limit=limit)
 
-    # ── extent ───────────────────────────────────────────────────────────
-
+    # extent
     async def extent(self) -> TimeExtent:
         now = datetime.now(timezone.utc)
         if (self._extent_cache and self._extent_at
@@ -141,8 +138,7 @@ class ConfigurableAdapter:
         self._extent_at = now
         return self._extent_cache
 
-    # ── fetch series (paged HTTP) ────────────────────────────────────────
-
+    # fetch series (paged HTTP)
     async def _fetch(self, raw_entity, measure_id, start, end):
         from .query import extract_rows  # avoid circular
         cfg = self.config

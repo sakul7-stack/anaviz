@@ -90,7 +90,7 @@ class ConfigInfo(BaseModel):
     description: str | None = None
 
 
-# ── Dataset discovery ─────────────────────────────────────────────────────
+# Dataset discovery
 
 @app.get("/api/datasets", response_model=list[DatasetSummary])
 async def list_datasets():
@@ -160,7 +160,7 @@ async def matrix(request: MatrixQuery):
         raise HTTPException(400, str(exc)) from exc
 
 
-# ── Legacy facades ────────────────────────────────────────────────────────
+# Legacy facades
 
 @app.get("/api/extent")
 async def legacy_extent():
@@ -245,7 +245,7 @@ async def clear_cache():
     return {"ok": True}
 
 
-# ── Static frontend ───────────────────────────────────────────────────────
+# Static frontend
 
 app.mount("/static", StaticFiles(directory=str(settings.frontend_path)), name="frontend")
 

@@ -2,7 +2,7 @@
  * utils.js — Shared helpers, API calls, data transformation.
  */
 
-// ── DOM + constants ──────────────────────────────────────────────────────
+// DOM + constants
 
 export const $ = (selector) => document.querySelector(selector);
 
@@ -20,7 +20,7 @@ export function chartPixelWidth() {
   return Math.max(300, wrap.clientWidth - 20);
 }
 
-// ── Date helpers ─────────────────────────────────────────────────────────
+// Date helpers
 
 /** Format a Date as a datetime-local input value. */
 export function toLocalISO(date) {
@@ -40,7 +40,7 @@ export function parseLocalISO(str) {
   return isNaN(date) ? null : date.getTime() / 1000;
 }
 
-// ── API helpers ──────────────────────────────────────────────────────────
+// API helpers
 
 /**
  * Make a GET request to the API.
@@ -90,7 +90,7 @@ export async function apiPost(path, body, signal) {
   return response.json();
 }
 
-// ── Response adapters ────────────────────────────────────────────────────
+// Response adapters
 
 /**
  * Convert the canonical /api/query response into the format
@@ -156,7 +156,7 @@ export function matrixResponseToHeatmap(response) {
   };
 }
 
-// ── Time axis + interpolation ────────────────────────────────────────────
+// Time axis + interpolation
 
 /**
  * Build a shared time axis from all series results.

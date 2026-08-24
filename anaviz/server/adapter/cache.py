@@ -64,8 +64,7 @@ class GenericCache:
         self.pool = pool
         self.dataset_key = dataset_key
 
-    # ── Schema ───────────────────────────────────────────────────────────
-
+    # Schema
     @staticmethod
     async def ensure_tables(cur) -> None:
         for stmt in SCHEMA_DDL.split(";"):
@@ -73,16 +72,14 @@ class GenericCache:
             if stmt:
                 await cur.execute(stmt)
 
-    # ── Coverage ─────────────────────────────────────────────────────────
-
+    # Coverage
     async def coverage(self, entity_id, measure_id, start, end):
         async with self.pool.connection() as conn:
             cur = await conn.execute(
                 COVERAGE, (self.dataset_key, entity_id, measure_id, start, end))
             return [(a, b) for a, b in await cur.fetchall()]
 
-    # ── Store ────────────────────────────────────────────────────────────
-
+    # Store
     async def store(self, entity_id, measure_id, rows, intervals, *,
                     rollup_levels=None):
         if not rows and not intervals:
@@ -148,8 +145,7 @@ class GenericCache:
             async with conn.transaction():
                 await self._store_rollup(conn.cursor(), entity_id, measure_id, bucket_rows)
 
-    # ── Read ─────────────────────────────────────────────────────────────
-
+    # Read
     async def read_rollup(self, entity_id, measure_id, bucket_s, start, end, cap):
         lo = datetime.fromtimestamp(
             (start.timestamp() // bucket_s) * bucket_s, tz=timezone.utc)
@@ -187,8 +183,7 @@ class GenericCache:
         q = np.array([r[2] for r in rows], dtype=np.int16)
         return t, v, q, total, len(rows) < total
 
-    # ── Delete ───────────────────────────────────────────────────────────
-
+    # Delete
     async def drop_dataset(self):
         async with self.pool.connection() as conn:
             async with conn.transaction():

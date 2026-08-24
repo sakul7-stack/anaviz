@@ -13,21 +13,21 @@
 import { $, COLORS, MAX_SERIES } from "./utils.js";
 import { getValuesAtTime } from "./chart.js";
 
-// ── Constants ────────────────────────────────────────────────────────────
+// Constants
 
 const DEFAULT_HEIGHT = 72;
 const MIN_HEIGHT = 36;
 const MAX_HEIGHT = 260;
 const LABEL_HEIGHT = 16;  // bottom strip for value ticks
 
-// ── State ────────────────────────────────────────────────────────────────
+// State
 
 let rows = [];              // [{ entity, canvas, bins, ... }]
 let lastRenderData = null;
 let binCount = 24;
 let hoverState = { time: null, values: null };
 
-// ── Public API ───────────────────────────────────────────────────────────
+// Public API
 
 /**
  * Rebuild or refresh histograms from the current chart data.
@@ -121,7 +121,7 @@ export function binInfoLine(entityIndex, value) {
     </div>`;
 }
 
-// ── Build a histogram row ────────────────────────────────────────────────
+// Build a histogram row
 
 function buildRow(wrap, entity, index) {
   // Create DOM structure
@@ -212,7 +212,7 @@ function buildRow(wrap, entity, index) {
   return entry;
 }
 
-// ── Bin computation ──────────────────────────────────────────────────────
+// Bin computation
 
 function makeBins(values, nBins = 24) {
   const n = values.length;
@@ -250,7 +250,7 @@ function findBinIndex(edges, value) {
   return value >= edges[edges.length - 1] ? edges.length - 2 : 0;
 }
 
-// ── Drawing ──────────────────────────────────────────────────────────────
+// Drawing
 
 function drawHistogram(row) {
   const cv = row.canvas;
@@ -331,7 +331,7 @@ function drawHistogram(row) {
   }
 }
 
-// ── Bin hover ────────────────────────────────────────────────────────────
+// Bin hover
 
 function handleBinHover(row, e) {
   const bins = row.bins;
@@ -361,7 +361,7 @@ function handleBinHover(row, e) {
   tip.style.top = Math.min(innerHeight - 80, e.clientY + 14) + "px";
 }
 
-// ── Helpers ──────────────────────────────────────────────────────────────
+// Helpers
 
 function formatValue(v) {
   if (v == null || !isFinite(v)) return "-";

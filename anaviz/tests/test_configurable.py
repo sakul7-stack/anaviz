@@ -19,7 +19,7 @@ from server.api.configurable import (
 from server.api.contracts import MatrixQuery, SeriesQuery
 
 
-# ── Fake cache (same public interface the adapter uses) ──────────────────────
+# Fake cache (same public interface the adapter uses)
 
 class FakeCache:
     def __init__(self, dataset_key="default:abc"):
@@ -81,7 +81,7 @@ class FakeCache:
         self.covered.clear()
 
 
-# ── Minimal config for a datasource-shaped API ───────────────────────────────
+# Minimal config for a datasource-shaped API
 
 ARCHIVE_CONFIG = {
     "version": 1,
@@ -161,7 +161,7 @@ def _dt(seconds: int) -> datetime:
     return datetime.fromtimestamp(seconds, tz=timezone.utc)
 
 
-# ── Extraction helpers ────────────────────────────────────────────────────────
+# Extraction helpers
 
 def test_get_path_dotted():
     assert get_path({"a": {"b": [1]}}, "a.b") == [1]
@@ -230,7 +230,7 @@ def test_extract_rows_row_shape():
     assert rows[0][2] == 0             # un-mapped quality defaults to 0
 
 
-# ── Adapter behavior ──────────────────────────────────────────────────────────
+# Adapter behavior
 
 def test_describe_builds_canonical_schema():
     schema = asyncio.run(_adapter().describe())
@@ -332,7 +332,7 @@ def test_matrix_rejects_unsupported_measure():
         asyncio.run(adapter.matrix(request))
 
 
-# ── Coverage arithmetic (reused from common) ─────────────────────────────────
+# Coverage arithmetic (reused from common)
 
 def test_coverage_gaps_preserve_internal_source_gaps():
     gaps = coverage_gaps(_dt(0), _dt(30),
