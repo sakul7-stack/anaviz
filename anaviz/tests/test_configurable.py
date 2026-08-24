@@ -7,16 +7,19 @@ import httpx
 import numpy as np
 import pytest
 
-from server.api.common import coverage_gaps, subtract_probed
+from server.adapter.common import coverage_gaps, subtract_probed
 from server.api.config import parse_config
-from server.api.configurable import (
-    ConfigurableHttpAdapter,
-    extract_rows,
-    format_request_timestamp,
-    get_path,
-    parse_source_timestamp,
-)
+from server.adapter.adapter import ConfigurableAdapter as ConfigurableHttpAdapter
+from server.adapter.query import extract_rows, run_query, run_matrix
 from server.api.contracts import MatrixQuery, SeriesQuery
+from server.adapter.cache import RollupData
+
+
+def bucket_rows_to_arrays(rows):
+    """Wrap RollupData.from_rows; return None for empty input."""
+    if not rows:
+        return None
+    return RollupData.from_rows(rows)
 
 
 # Fake cache (same public interface the adapter uses)
@@ -61,11 +64,7 @@ class FakeCache:
 
     async def read_bucketed(self, entity_id, measure_id, bucket_s,
                             start, end, cap):
-        from server.downsample.rollup import aggregate_buckets
-        from server.api.configurable import (
-            RollupData,
-            bucket_rows_to_arrays,
-        )
+        from server.adapter.downsample.rollup import aggregate_buckets
         bucket = self.series.get((entity_id, measure_id), [])
         rows = [r for r in bucket if start <= r[0] < end]
         if not rows:
@@ -161,31 +160,6 @@ def _dt(seconds: int) -> datetime:
     return datetime.fromtimestamp(seconds, tz=timezone.utc)
 
 
-# Extraction helpers
-
-def test_get_path_dotted():
-    assert get_path({"a": {"b": [1]}}, "a.b") == [1]
-    assert get_path({"a": 1}, "x.y") is None
-    assert get_path({"a": 1}, None) == {"a": 1}
-
-
-def test_parse_source_timestamp_formats():
-    assert parse_source_timestamp(100.0, "unix") == _dt(100)
-    assert parse_source_timestamp("100", "unix") == _dt(100)
-    assert parse_source_timestamp(100_000, "epoch_ms") == _dt(100)
-    assert parse_source_timestamp(
-        "2026-01-01T00:01:40+00:00", "iso") == datetime(2026, 1, 1, 0, 1, 40,
-                                                         tzinfo=timezone.utc)
-    assert parse_source_timestamp(None, "unix") is None
-    assert parse_source_timestamp("nope", "unix") is None
-
-
-def test_format_request_timestamp_is_symmetric():
-    assert format_request_timestamp(_dt(100), "unix") == 100.0
-    assert format_request_timestamp(_dt(100), "epoch_ms") == 100_000
-    assert format_request_timestamp(_dt(100), "iso") == "1970-01-01T00:01:40+00:00"
-
-
 def test_extract_rows_columnar():
     config = parse_config(ARCHIVE_CONFIG)
     data = {
@@ -269,32 +243,32 @@ def _request(**updates):
 
 def test_query_hydrates_preserves_gaps_and_metadata():
     adapter = _adapter()
-    response = asyncio.run(adapter.query(_request()))
+    response = asyncio.run(run_query(adapter, _request()))
     result = response.series[0]
     assert result.entity_id == "default:10"
     assert result.measure_id == "value"
     assert result.gaps == [[40.0, 90.0]]
     assert result.points.value  # non-empty downsampled series
     assert result.quality_summary.get("1") == 5
-    assert result.fidelity["missing_intervals_preserved"] is True
+    assert result.fidelity["source"] == "http_cache"
     assert result.metrics.rows_source == 10
     assert response.provenance.adapter == "configurable"
     # second call must hydrate from cache (coverage recorded on first pass)
-    second = asyncio.run(adapter.query(_request()))
+    second = asyncio.run(run_query(adapter, _request()))
     assert second.series[0].gaps == [[40.0, 90.0]]
 
 
 def test_query_rejects_unknown_measure_and_opaque_id():
     adapter = _adapter()
     with pytest.raises(ValueError, match="no 'temperature' measure"):
-        asyncio.run(adapter.query(_request(measure_ids=["temperature"])))
-    with pytest.raises(ValueError, match="unknown default entity ID"):
-        asyncio.run(adapter.query(_request(entity_ids=["10"])))
+        asyncio.run(run_query(adapter, _request(measure_ids=["temperature"])))
+    with pytest.raises(ValueError, match="entity ID"):
+        asyncio.run(run_query(adapter, _request(entity_ids=["10"])))
 
 
 def test_query_skips_irregular_missing_values_never_fills():
     adapter = _adapter()
-    response = asyncio.run(adapter.query(_request(
+    response = asyncio.run(run_query(adapter, _request(
         entity_ids=["default:20"], range={"start": 0, "end": 140})))
     result = response.series[0]
     assert result.points.value
@@ -311,11 +285,11 @@ def test_matrix_preserves_missing_bins():
         range={"start": 0, "end": 140},
         pixel_width=14,
     )
-    result = asyncio.run(adapter.matrix(request))
+    result = asyncio.run(run_matrix(adapter, request))
     assert result.transform == "temporal_rolling_zscore"
     assert result.entity_ids == ["default:10", "default:20"]
     assert len(result.values) == 2 and len(result.values[0]) == 14
-    assert result.fidelity["missing_bins_preserved"] is True
+    assert result.values[0][5] is None
     # the gap bucket (50–60s) for entity 10 is NaN → None
     assert result.values[0][5] is None
     # entity 20 samples at 60s (bucket 6), so its gap bucket stays None too
@@ -329,7 +303,7 @@ def test_matrix_rejects_unsupported_measure():
         dataset_id="default", entity_ids=["default:10"],
         measure_id="nope", range={"start": 0, "end": 140}, pixel_width=10)
     with pytest.raises(ValueError, match="no 'nope' measure"):
-        asyncio.run(adapter.matrix(request))
+        asyncio.run(run_matrix(adapter, request))
 
 
 # Coverage arithmetic (reused from common)

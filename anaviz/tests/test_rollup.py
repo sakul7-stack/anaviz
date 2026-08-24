@@ -9,18 +9,16 @@ import numpy as np
 import pytest
 
 from server.api.config import parse_config
-from server.api.configurable import (
-    ConfigurableHttpAdapter,
-    RollupData,
-    bucket_rows_to_arrays,
-)
-from server.api.contracts import SeriesQuery
-from server.downsample.rollup import (
+from server.adapter.adapter import ConfigurableAdapter as ConfigurableHttpAdapter
+from server.adapter.cache import RollupData, GenericCache
+from server.adapter.query import run_query, run_matrix
+from server.api.contracts import SeriesQuery, MatrixQuery
+from server.adapter.downsample.rollup import (
     aggregate_buckets,
     select_tier,
     tier_name,
 )
-from tests.test_configurable import FakeCache
+from tests.test_configurable import FakeCache, bucket_rows_to_arrays
 
 
 # Tier selection
@@ -257,7 +255,7 @@ def _big_request():
 
 def test_query_uses_rollup_tier_for_big_range():
     adapter = _adapter()
-    response = asyncio.run(adapter.query(_big_request()))
+    response = asyncio.run(run_query(adapter, _big_request()))
     result = response.series[0]
     assert result.resolution == "16s"
     assert result.expected_step_seconds == 16.0
@@ -283,19 +281,19 @@ def test_query_uses_rollup_tier_for_big_range():
 def test_query_rollup_replays_from_cache():
     cache = FakeRollupCache()
     adapter = _adapter(cache)
-    asyncio.run(adapter.query(_big_request()))
-    second = asyncio.run(adapter.query(_big_request()))
+    asyncio.run(run_query(adapter, _big_request()))
+    second = asyncio.run(run_query(adapter, _big_request()))
     result = second.series[0]
     assert result.resolution == "16s"
     assert result.metrics.rows_source == 35900
     assert result.points.value == asyncio.run(
-        adapter.query(_big_request())).series[0].points.value
+           run_query(adapter, _big_request())).series[0].points.value
 
 
 def test_query_backfills_legacy_cache_without_rollup_rows():
     cache = LegacyCache()
     adapter = _adapter(cache)
-    result = asyncio.run(adapter.query(_big_request())).series[0]
+    result = asyncio.run(run_query(adapter, _big_request())).series[0]
     # served from the one-time in-memory backfill, persisted for later queries
     assert result.resolution == "16s"
     assert result.points.value
@@ -314,7 +312,7 @@ def test_query_backfill_truncated_never_persists_partial_rollup():
         for t, v, q in _dense_rows()]
     cache.series[key].sort(key=lambda r: r[0])
     adapter = _adapter(cache, config=config)
-    result = asyncio.run(adapter.query(_big_request())).series[0]
+    result = asyncio.run(run_query(adapter, _big_request())).series[0]
     assert result.resolution == "16s"
     assert result.metrics.truncated is True
     assert result.fidelity["truncated"] is True
@@ -328,11 +326,11 @@ def test_backfill_never_double_counts_existing_buckets():
     cache = LegacyCache()
     adapter = _adapter(cache)
     # hydrate + first rollup-tier query (backfills and persists the rollup)
-    first = asyncio.run(adapter.query(_big_request()))
+    first = asyncio.run(run_query(adapter, _big_request()))
     assert first.series[0].resolution == "16s"
     assert cache.rollup_stores == 1
     # second query reads the persisted buckets; nothing new to store
-    second = asyncio.run(adapter.query(_big_request()))
+    second = asyncio.run(run_query(adapter, _big_request()))
     assert second.series[0].resolution == "16s"
     assert second.series[0].points.value
     assert cache.rollup_stores == 1
@@ -351,7 +349,7 @@ def test_query_small_range_stays_raw():
                     "points_per_pixel": 2},
         downsampling="M4",
     )
-    result = asyncio.run(adapter.query(request)).series[0]
+    result = asyncio.run(run_query(adapter, request)).series[0]
     assert result.resolution == "raw"
     assert result.fidelity["aggregated"] is False
 
@@ -362,7 +360,7 @@ def test_query_without_rollup_opt_in_stays_raw_even_for_big_ranges():
     config = {k: v for k, v in DENSE_CONFIG.items()
               if k not in ("rollup_enabled", "rollup_levels")}
     adapter = _adapter(config=config)
-    result = asyncio.run(adapter.query(_big_request())).series[0]
+    result = asyncio.run(run_query(adapter, _big_request())).series[0]
     assert result.resolution == "raw"
     assert result.fidelity["aggregated"] is False
     assert result.metrics.rows_scanned == result.metrics.rows_source
@@ -375,7 +373,7 @@ def test_query_rollup_levels_alone_opts_in():
     config = {k: v for k, v in DENSE_CONFIG.items()
               if k != "rollup_enabled"}
     adapter = _adapter(config=config)
-    result = asyncio.run(adapter.query(_big_request())).series[0]
+    result = asyncio.run(run_query(adapter, _big_request())).series[0]
     assert result.resolution == "16s"
     assert result.fidelity["aggregated"] is True
 
@@ -386,7 +384,7 @@ def test_query_rollup_honors_config_override_levels():
     adapter = _adapter(config=config)
     # target 36s < 4*64 -> raw under the explicit (coarser) tiers
     request = _big_request()
-    result = asyncio.run(adapter.query(request)).series[0]
+    result = asyncio.run(run_query(adapter, request)).series[0]
     assert result.resolution == "raw"
 
     # a much bigger span lands on the 256s tier
@@ -399,7 +397,7 @@ def test_query_rollup_honors_config_override_levels():
                     "points_per_pixel": 2},
         downsampling="M4",
     )
-    result = asyncio.run(adapter.query(request)).series[0]
+    result = asyncio.run(run_query(adapter, request)).series[0]
     assert result.resolution == "4m16s"   # tier_name(256)
     assert result.expected_step_seconds == 256.0
 
@@ -426,7 +424,7 @@ def test_rollup_can_be_disabled_per_dataset():
               "rollup_levels": [16, 64]}      # override ignored when off
     cache = LegacyCache()
     adapter = _adapter(cache, config=config)
-    result = asyncio.run(adapter.query(_big_request())).series[0]
+    result = asyncio.run(run_query(adapter, _big_request())).series[0]
     assert result.resolution == "raw"
     assert result.fidelity["aggregated"] is False
     assert result.metrics.rows_source == 35900
@@ -440,7 +438,7 @@ def test_rollup_can_be_disabled_per_dataset():
         resolution={"strategy": "auto", "pixel_width": 500,
                     "points_per_pixel": 2},
         downsampling="M4")
-    result = asyncio.run(adapter.query(request)).series[0]
+    result = asyncio.run(run_query(adapter, request)).series[0]
     assert result.resolution == "raw"
 
 
@@ -462,7 +460,7 @@ def test_query_dense_raw_range_never_truncates():
     cache.covered.append(("default:10", "value",
                           _dt(0), _dt(36000), "queried"))
     adapter = _adapter(cache, config=config)
-    result = asyncio.run(adapter.query(_big_request())).series[0]
+    result = asyncio.run(run_query(adapter, _big_request())).series[0]
     # served aggregated from the full range, not truncated raw rows
     assert result.resolution != "raw"
     assert result.fidelity["aggregated"] is True
@@ -483,7 +481,7 @@ def test_query_small_raw_range_below_cap_stays_raw():
     config = {k: v for k, v in DENSE_CONFIG.items()
               if k not in ("rollup_enabled", "rollup_levels")}
     adapter = _adapter(config=config)   # row_cap 100k > 35.9k rows
-    result = asyncio.run(adapter.query(_big_request())).series[0]
+    result = asyncio.run(run_query(adapter, _big_request())).series[0]
     assert result.resolution == "raw"
     assert result.fidelity["aggregated"] is False
     assert result.fidelity["truncated"] is False
@@ -492,7 +490,6 @@ def test_query_small_raw_range_below_cap_stays_raw():
 
 def test_matrix_dense_range_never_truncates():
     """Matrix view on a dense range must also use the full-range aggregation."""
-    from server.api.contracts import MatrixQuery
     config = {k: v for k, v in DENSE_CONFIG.items()
               if k not in ("rollup_enabled", "rollup_levels")}
     config["row_cap"] = 5000
@@ -510,7 +507,7 @@ def test_matrix_dense_range_never_truncates():
         measure_id="value", range={"start": 0, "end": 36000},
         pixel_width=50,
     )
-    result = asyncio.run(adapter.matrix(request))
+    result = asyncio.run(run_matrix(adapter, request))
     assert len(result.values) == 1 and len(result.values[0]) == 50
     # cells across the full range are scored (no truncated tail of None bins)
     scored = sum(1 for v in result.values[0] if v is not None)
@@ -520,7 +517,6 @@ def test_matrix_dense_range_never_truncates():
 def test_read_bucketed_epoch_anchor_negative_timestamps():
     """Buckets are anchored at the Unix epoch even before 1970: floor
     division must agree between the SQL path and numpy aggregation."""
-    from server.api.configurable import bucket_rows_to_arrays
     cache = LegacyCache()
     key = ("default:10", "value")
     cache.series[key] = [
@@ -550,7 +546,7 @@ def test_query_dense_rows_source_exact_at_cap():
     cache.covered.append(("default:10", "value",
                           _dt(0), _dt(36000), "queried"))
     adapter = _adapter(cache, config=config)
-    result = asyncio.run(adapter.query(_big_request())).series[0]
+    result = asyncio.run(run_query(adapter, _big_request())).series[0]
     assert result.metrics.rows_source == 35900   # full count, not buckets' sum
 
 

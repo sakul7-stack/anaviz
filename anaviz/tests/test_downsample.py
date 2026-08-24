@@ -1,7 +1,7 @@
 import numpy as np
-from server.downsample import downsample
-from server.downsample.lttb import lttb_indices
-from server.downsample.m4 import m4_series
+from server.adapter.downsample import downsample
+from server.adapter.downsample.lttb import lttb_indices
+from server.adapter.downsample.m4 import m4_series
 
 
 def test_lttb_keeps_spike():
@@ -138,7 +138,7 @@ def test_m4_uses_extreme_arrays():
 
 
 def test_minmax_lttb_keeps_spike_and_dip():
-    from server.downsample.minmax_lttb import minmax_lttb_indices
+    from server.adapter.downsample.minmax_lttb import minmax_lttb_indices
     rng = np.random.default_rng(3)
     n = 6000
     t = np.arange(n, dtype=float)
@@ -159,7 +159,7 @@ def test_minmax_lttb_keeps_spike_and_dip():
 
 
 def test_minmax_lttb_band_envelopes_line():
-    from server.downsample.minmax_lttb import minmax_lttb_indices
+    from server.adapter.downsample.minmax_lttb import minmax_lttb_indices
     rng = np.random.default_rng(4)
     n = 2000
     t = np.arange(n, dtype=float)

@@ -23,7 +23,7 @@ def test_generic_and_legacy_routes_coexist():
 def test_clear_cache_never_touches_a_datasource():
     """The project cache is the only thing clear-cache can truncate; there is
     no direct-source mode anymore, so clearing is always safe."""
-    from server.api.configurable import GenericDatasetCache
+    from server.adapter.cache import GenericCache as GenericDatasetCache
     import asyncio
 
     executed = []
