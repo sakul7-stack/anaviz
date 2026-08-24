@@ -1,5 +1,10 @@
 -- Generic fixed-schema cache for the PROJECT container.
 --
+-- TimescaleDB is used for the two timestamp-dense tables below. The cache is
+-- disposable and hydrates again over HTTP, so these declarations also make a
+-- fresh cache volume start with the intended hypertable layout.
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
 -- Any number of configured datasets share these tables; rows are isolated by
 -- `dataset_key` = "<dataset_id>:<config_fingerprint>". A changed config
 -- fingerprint therefore creates a fresh namespace and can never leak stale
@@ -21,6 +26,15 @@ CREATE TABLE IF NOT EXISTS cache_series (
 
 CREATE INDEX IF NOT EXISTS ix_cache_series_range
     ON cache_series (dataset_key, entity_id, measure_id, ts);
+
+-- Partition raw samples by time while preserving the existing primary key and
+-- conflict-safe inserts used by GenericCache.store(). migrate_data handles an
+-- old ordinary cache table during an in-place upgrade.
+SELECT create_hypertable(
+    'cache_series', 'ts',
+    if_not_exists => TRUE,
+    migrate_data => TRUE
+);
 
 -- Coverage describes ranges that have been queried, not ranges in which every
 -- timestamp has a value. 'empty' ranges are known to contain no samples and
@@ -63,3 +77,9 @@ CREATE TABLE IF NOT EXISTS cache_rollup (
 
 CREATE INDEX IF NOT EXISTS ix_cache_rollup_range
     ON cache_rollup (dataset_key, entity_id, measure_id, bucket_s, bucket_start);
+
+SELECT create_hypertable(
+    'cache_rollup', 'bucket_start',
+    if_not_exists => TRUE,
+    migrate_data => TRUE
+);

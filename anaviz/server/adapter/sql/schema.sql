@@ -1,3 +1,8 @@
+-- TimescaleDB is already supplied by the project image. Keep this startup
+-- schema idempotent so a fresh database and an existing cache converge on the
+-- same layout.
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
 -- cache_series: raw time-series samples
 CREATE TABLE IF NOT EXISTS cache_series (
     dataset_key TEXT NOT NULL,
@@ -10,6 +15,11 @@ CREATE TABLE IF NOT EXISTS cache_series (
 );
 CREATE INDEX IF NOT EXISTS ix_cs_r
     ON cache_series (dataset_key, entity_id, measure_id, ts);
+SELECT create_hypertable(
+    'cache_series', 'ts',
+    if_not_exists => TRUE,
+    migrate_data => TRUE
+);
 
 -- cache_coverage: which ranges have been fetched
 CREATE TABLE IF NOT EXISTS cache_coverage (
@@ -46,3 +56,8 @@ CREATE TABLE IF NOT EXISTS cache_rollup (
 );
 CREATE INDEX IF NOT EXISTS ix_cr_r
     ON cache_rollup (dataset_key, entity_id, measure_id, bucket_s, bucket_start);
+SELECT create_hypertable(
+    'cache_rollup', 'bucket_start',
+    if_not_exists => TRUE,
+    migrate_data => TRUE
+);
