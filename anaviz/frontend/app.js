@@ -27,13 +27,24 @@ import {
 
 import {
   initHeatmap, updateHeatmap, highlightColumn,
-  redrawHeatmap, setHeatmapTooltipExtra,
+  redrawHeatmap, setHeatmapTooltipExtra, getHeatmapExport,
 } from "./heatmap.js";
+
+import {
+  updateStatsTable, clearStatsTable,
+} from "./stats.js";
+
+import {
+  updateBoxes, clearBoxes, getBoxesExport,
+} from "./box.js";
 
 import {
   updateHistograms, clearHistograms,
   setHistogramHover, clearHistogramHover, binInfoLine,
+  getHistogramsExport,
 } from "./histogram.js";
+
+import { saveCsv, saveFigurePng } from "./export.js";
 
 // Application state
 
@@ -48,6 +59,8 @@ let lastResults = [];        // raw API results from last fetch (for re-renderin
 // UI helpers
 const isHeatmapVisible = () => $("#showHeatmap").checked;
 const isHistogramVisible = () => $("#showHist").checked;
+const isStatsVisible = () => $("#showStats").checked;
+const isBoxVisible = () => $("#showBox").checked;
 const getHistogramBinCount = () =>
   Math.min(100, Math.max(4, Math.round(Number($("#histBins")?.value) || 24)));
 const getInterpolationMode = () => $("#interpMode")?.value || "linear";
@@ -406,6 +419,206 @@ function renderHistogramPanel(hasData) {
   }
 }
 
+function renderStatsPanel(hasData) {
+  const wrap = document.getElementById("statwrap");
+  if (!isStatsVisible()) {
+    wrap.style.display = "none";
+    return;
+  }
+  wrap.style.display = "";
+  if (hasData && lastRenderData) {
+    updateStatsTable(selected, lastRenderData);
+  } else {
+    clearStatsTable();
+  }
+}
+
+function renderBoxPanel(hasData) {
+  const wrap = document.getElementById("boxwrap");
+  if (!isBoxVisible()) {
+    wrap.style.display = "none";
+    return;
+  }
+  wrap.style.display = "";
+  if (hasData && lastRenderData) {
+    updateBoxes(selected, lastRenderData);
+  } else {
+    clearBoxes();
+  }
+}
+
+// Export (PNG / CSV)
+
+const notify = (msg) => { $("#stats").textContent = msg; };
+
+const fmtDateTime = (t) =>
+  t == null ? "" : new Date(t * 1000).toLocaleString();
+
+const appName = () =>
+  document.querySelector("header h1")?.textContent.trim() || "Time series";
+
+function fileStem(panel) {
+  const ds = String(datasetId || "dataset").replace(/[^\w.-]+/g, "_").slice(0, 40);
+  const end = view.t1 != null ? new Date(view.t1 * 1000) : new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  const ts =
+    `${end.getFullYear()}${p(end.getMonth() + 1)}${p(end.getDate())}` +
+    `_${p(end.getHours())}${p(end.getMinutes())}${p(end.getSeconds())}`;
+  return `${ds}_${panel}_${ts}`;
+}
+
+$("#exportChartPng").onclick = () => {
+  const rd = lastRenderData;
+  const canvas = plot?.ctx?.canvas;
+  if (!canvas || !rd?.data?.[0]?.length) return notify("Nothing to export");
+
+  saveFigurePng({
+    title: appName(),
+    subtitle:
+      `${rd.selected.map((e) => e.label || e.name).join(", ")}` +
+      ` · ${fmtDateTime(view.t0)} → ${fmtDateTime(view.t1)}`,
+    xAxisLabel: "Time",
+    yAxisLabel: measureId,
+    entries: [{ canvas }],
+  }, fileStem("series") + ".png");
+};
+
+$("#exportChartCsv").onclick = () => {
+  const rd = lastRenderData;
+  if (!rd?.data?.[0]?.length) return notify("Nothing to export");
+
+  const times = rd.data[0];
+  const rows = [["time", ...rd.selected.map((e) => e.label || e.name)]];
+
+  for (let i = 0; i < times.length; i++) {
+    const row = [new Date(times[i] * 1000).toISOString()];
+    let base = 1;
+    for (let e = 0; e < rd.selected.length; e++) {
+      const v = rd.data[base]?.[i];
+      row.push(v == null ? "" : String(Math.round(v * 1e9) / 1e9));
+      base += rd.bandByEntity?.[e] ? 3 : 1;
+    }
+    rows.push(row);
+  }
+
+  saveCsv(rows, fileStem("series") + ".csv");
+};
+
+$("#exportHeatmapPng").onclick = () => {
+  const hm = getHeatmapExport();
+  const canvas = document.getElementById("heatmap");
+  if (!isHeatmapVisible() || !hm || !canvas?.width)
+    return notify("Heatmap unavailable");
+
+  saveFigurePng({
+    title: `${appName()} · temporal z-score`,
+    subtitle:
+      `${hm.entityIds.map((id) => hm.names[id] || `ch ${id}`).join(", ")}` +
+      ` · ${fmtDateTime(hm.t[0])} → ${fmtDateTime(hm.t[hm.t.length - 1])}`,
+    xAxisLabel: "Time",
+    yAxisLabel: "Entity",
+    entries: [{ canvas }],
+  }, fileStem("heatmap") + ".png");
+};
+
+$("#exportHeatmapCsv").onclick = () => {
+  const hm = getHeatmapExport();
+  if (!hm) return notify("Heatmap unavailable");
+
+  const rows = [
+    ["entity", ...hm.t.map((t) => new Date(t * 1000).toISOString())],
+  ];
+  hm.entityIds.forEach((id, r) => {
+    rows.push([
+      hm.names[id] || `ch ${id}`,
+      ...hm.scores[r].map((s) =>
+        s == null ? "" : String(Math.round((s * 6 - 3) * 1e4) / 1e4)
+      ),
+    ]);
+  });
+
+  saveCsv(rows, fileStem("heatmap") + ".csv");
+};
+
+$("#exportHistPng").onclick = () => {
+  const entries = [...document.querySelectorAll("#hists .hist-row")]
+    .map((rowEl) => ({
+      title: rowEl.querySelector(".hist-head")?.textContent.trim(),
+      canvas: rowEl.querySelector(".hist-canvas"),
+    }))
+    .filter((e) => e.canvas);
+
+  if (!entries.length) return notify("No histograms");
+
+  saveFigurePng({
+    title: `${appName()} · value distributions`,
+    subtitle:
+      view.t0 != null
+        ? `${fmtDateTime(view.t0)} → ${fmtDateTime(view.t1)}`
+        : undefined,
+    xAxisLabel: "Value",
+    yAxisLabel: "Count",
+    entries,
+  }, fileStem("histograms") + ".png");
+};
+
+$("#exportHistCsv").onclick = () => {
+  const hists = getHistogramsExport();
+  if (!hists.length) return notify("No histograms");
+
+  const rows = [["entity", "bin_start", "bin_end", "count"]];
+  for (const h of hists) {
+    const { edges, counts } = h.bins;
+    for (let i = 0; i < counts.length; i++) {
+      rows.push([h.name, String(edges[i]), String(edges[i + 1]), String(counts[i])]);
+    }
+  }
+
+  saveCsv(rows, fileStem("histograms") + ".csv");
+};
+
+$("#exportBoxPng").onclick = () => {
+  const entries = [...document.querySelectorAll("#boxes .box-row")]
+    .map((rowEl) => ({
+      title: rowEl.querySelector(".hist-head")?.textContent.trim(),
+      canvas: rowEl.querySelector(".box-canvas"),
+    }))
+    .filter((e) => e.canvas);
+
+  if (!entries.length) return notify("No box plots");
+
+  saveFigurePng({
+    title: `${appName()} · box plots`,
+    subtitle:
+      view.t0 != null
+        ? `${fmtDateTime(view.t0)} → ${fmtDateTime(view.t1)}`
+        : undefined,
+    xAxisLabel: "Value",
+    entries,
+  }, fileStem("boxplots") + ".png");
+};
+
+$("#exportBoxCsv").onclick = () => {
+  const boxes = getBoxesExport();
+  if (!boxes.length) return notify("No box plots");
+
+  const rows = [[
+    "entity", "n", "min", "whisker_low", "q1", "median", "q3",
+    "whisker_high", "max", "outliers",
+  ]];
+  for (const b of boxes) {
+    const s = b.stats;
+    rows.push([
+      b.name, String(s.n),
+      String(s.min), String(s.wLo), String(s.q1), String(s.med),
+      String(s.q3), String(s.wHi), String(s.max),
+      String(s.outliers.length),
+    ]);
+  }
+
+  saveCsv(rows, fileStem("boxplots") + ".csv");
+};
+
 // Main fetch
 
 async function fetchData() {
@@ -472,6 +685,8 @@ async function fetchData() {
 
   renderStatsBar(stats, results);
   renderHistogramPanel(stats.hasData);
+  renderStatsPanel(stats.hasData);
+  renderBoxPanel(stats.hasData);
 
   // Update heatmap panel visibility
   const heatmapWrap = document.getElementById("heatmapwrap");
@@ -620,6 +835,14 @@ $("#showHist").addEventListener("change", () => {
     wrap.style.display = "none";
     clearHistogramHover();
   }
+});
+
+$("#showStats").addEventListener("change", () => {
+  renderStatsPanel(lastRenderData != null);
+});
+
+$("#showBox").addEventListener("change", () => {
+  renderBoxPanel(lastRenderData != null);
 });
 
 // Histogram bin count

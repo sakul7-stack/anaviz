@@ -63,6 +63,17 @@ export function setHeatmapTooltipExtra(fn) {
   tooltipExtra = fn;
 }
 
+/** Snapshot of current heatmap data for CSV/PNG export (null if empty). */
+export function getHeatmapExport() {
+  if (!data?.t?.length) return null;
+  return {
+    t: [...data.t],
+    entityIds: [...data.entity_ids],
+    scores: data.scores.map((row) => [...row]),
+    names: { ...nameMap },
+  };
+}
+
 /**
  * Update the heatmap with new data.
  * @param {Object|null} newData - { t: float[], entity_ids: string[], scores: (float|null)[][] }

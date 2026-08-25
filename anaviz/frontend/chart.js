@@ -129,10 +129,10 @@ export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, int
   let axes, scales;
 
   // Helper: build series config for a visible entity
-  function makeSeries(entity, scaleKey) {
+  function makeSeries(entity, scaleKey, entityIndex) {
     const cfg = {
       label: entity.label || entity.name,
-      stroke: COLORS[series.length % COLORS.length],
+      stroke: COLORS[entityIndex % COLORS.length],
       width: 1.5,
     };
     if (scaleKey) cfg.scale = scaleKey;
@@ -155,11 +155,11 @@ export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, int
     selected.slice(0, MAX_SERIES).forEach((entity, i) => {
       const scaleKey = i === 0 ? "y" : `y${i}`;
       scales[scaleKey] = {};
-      const color = COLORS[series.length % COLORS.length];
+      const color = COLORS[i % COLORS.length];
       const baseIndex = series.length;
 
       series.push({
-        ...makeSeries(entity, scaleKey),
+        ...makeSeries(entity, scaleKey, i),
         stroke: interpMode === "none" ? "rgba(0,0,0,0)" : color,
       });
 
@@ -180,10 +180,10 @@ export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, int
   } else {
     // All entities share one y-axis
     selected.slice(0, MAX_SERIES).forEach((entity, i) => {
-      const color = COLORS[series.length % COLORS.length];
+      const color = COLORS[i % COLORS.length];
       const baseIndex = series.length;
 
-      series.push(makeSeries(entity));
+      series.push(makeSeries(entity, null, i));
 
       if (bandByEntity?.[i]) {
         series.push({ stroke: "rgba(0,0,0,0)", points: { show: false } });

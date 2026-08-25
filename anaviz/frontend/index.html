@@ -28,6 +28,8 @@
       </div>
       <label class="toggle-row"><input type="checkbox" id="perAxis"><span>Per-entity Y axes</span></label>
       <label class="toggle-row"><input type="checkbox" id="showHeatmap"><span>Entity heatmap</span></label>
+      <label class="toggle-row"><input type="checkbox" id="showStats"><span>Summary statistics</span></label>
+      <label class="toggle-row"><input type="checkbox" id="showBox"><span>Box plots</span></label>
       <label class="toggle-row"><input type="checkbox" id="showHist"><span>Value histograms</span></label>
       <label class="toggle-row hist-bin-control"><span>Histogram bins</span><input type="number" id="histBins" min="4" max="100" step="1" value="24"></label>
     </div>
@@ -45,22 +47,50 @@
   </div>
   <div id="main">
     <div class="legend" id="legend">Select entities + date range, then click Go</div>
+    <div class="panel-label">Time Series
+      <span class="panel-actions">
+        <button class="export-btn" id="exportChartPng" title="Save chart as PNG">PNG</button>
+        <button class="export-btn" id="exportChartCsv" title="Save series as CSV">CSV</button>
+      </span>
+    </div>
     <div id="chartwrap"><div id="chart"></div></div>
+    <div id="statwrap" style="display:none">
+      <div class="panel-label">Summary Statistics <span class="panel-hint">(observed values in visible range)</span></div>
+      <div id="statstable"></div>
+    </div>
     <div id="heatmapwrap" style="display:none">
       <div id="heatmap-resizer" title="Drag to resize"></div>
       <div class="panel-label">Temporal z-score Heatmap <span class="panel-hint">(blue neg · green normal · red high · gray missing)</span><span class="panel-state" id="heatmapstate"></span>
-        <span class="hm-legend"><span class="hm-legend-label">z −3</span><span class="hm-legend-bar"></span><span class="hm-legend-label">z 0</span><span class="hm-legend-label">z +3</span><span class="hm-legend-missing">missing</span></span>
+        <span class="hm-legend"><span class="hm-legend-label">z −3</span><span class="hm-legend-bar"></span><span class="hm-legend-label">z +3</span><span class="hm-legend-missing">missing</span></span>
+        <span class="panel-actions">
+          <button class="export-btn" id="exportHeatmapPng" title="Save heatmap as PNG">PNG</button>
+          <button class="export-btn" id="exportHeatmapCsv" title="Save z-scores as CSV">CSV</button>
+        </span>
       </div>
       <div id="heatmap-plot"><canvas id="heatmap"></canvas><div id="heatmap-xaxis"></div><div id="heatmap-yaxis"></div></div>
       <div id="hm-tooltip"></div>
     </div>
+    <div id="boxwrap" style="display:none">
+      <div class="panel-label">Box Plots <span class="panel-hint">(median · IQR · 1.5×IQR whiskers · outliers)</span>
+        <span class="panel-actions">
+          <button class="export-btn" id="exportBoxPng" title="Save box plots as PNG">PNG</button>
+          <button class="export-btn" id="exportBoxCsv" title="Save box statistics as CSV">CSV</button>
+        </span>
+      </div>
+      <div id="boxes"></div><div id="box-tooltip"></div>
+    </div>
     <div id="histwrap" style="display:none">
-      <div class="panel-label">Value Histograms <span class="panel-hint">(observed values · drag to resize)</span></div>
+      <div class="panel-label">Value Histograms <span class="panel-hint">(observed values · drag to resize)</span>
+        <span class="panel-actions">
+          <button class="export-btn" id="exportHistPng" title="Save histograms as PNG">PNG</button>
+          <button class="export-btn" id="exportHistCsv" title="Save bins as CSV">CSV</button>
+        </span>
+      </div>
       <div id="hists"></div><div id="hist-tooltip"></div>
     </div>
   </div>
 </div>
 <div id="tooltip"></div>
-<script type="module" src="static/app.js?v=3"></script>
+<script type="module" src="static/app.js?v=8"></script>
 </body>
 </html>

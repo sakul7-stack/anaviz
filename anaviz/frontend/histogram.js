@@ -102,6 +102,20 @@ export function clearHistogramHover() {
   if (tip) tip.style.display = "none";
 }
 
+/** Snapshot of current bins for CSV export. */
+export function getHistogramsExport() {
+  return rows
+    .filter((row) => row.bins)
+    .map((row) => ({
+      name: row.name,
+      bins: {
+        edges: [...row.bins.edges],
+        counts: [...row.bins.counts],
+        total: row.bins.total,
+      },
+    }));
+}
+
 /**
  * Extra tooltip line for the chart: which bin a hovered value falls into.
  */
@@ -294,11 +308,23 @@ function drawHistogram(row) {
   ctx.fillStyle = "#6c757d";
   ctx.font = "10px system-ui";
   ctx.textBaseline = "top";
-  ctx.fillText(formatValue(bins.min), 2, barHeight + 3);
+
+  const span = bins.max - bins.min;
+  const targetTicks = Math.max(3, Math.min(10, Math.floor(cssWidth / 80)));
+  const ticks = niceTicks(bins.min, bins.max, targetTicks);
+
+  let prevLabel = null;
   ctx.textAlign = "center";
-  ctx.fillText(formatValue((bins.min + bins.max) / 2), cssWidth / 2, barHeight + 3);
-  ctx.textAlign = "right";
-  ctx.fillText(formatValue(bins.max), cssWidth - 2, barHeight + 3);
+  for (const t of ticks) {
+    const label = formatValue(t);
+    if (label === "0") continue;
+    if (label === prevLabel) continue;
+    prevLabel = label;
+    let x = ((t - bins.min) / span) * cssWidth;
+    const w = ctx.measureText(label).width;
+    x = Math.max(w / 2 + 1, Math.min(cssWidth - w / 2 - 1, x));
+    ctx.fillText(label, x, barHeight + 3);
+  }
   ctx.textAlign = "left";
 
   // Draw hovered-value marker (from chart/heatmap hover)
@@ -363,7 +389,22 @@ function handleBinHover(row, e) {
 
 // Helpers
 
-function formatValue(v) {
+/** Generate ~maxTicks "nice" ticks (1/2/5 × 10ᵏ steps) across [min, max]. */
+export function niceTicks(min, max, maxTicks) {
+  if (!isFinite(min) || !isFinite(max) || !(max > min)) return [min];
+  const rawStep = (max - min) / Math.max(1, maxTicks);
+  const mag = Math.pow(10, Math.floor(Math.log10(rawStep)));
+  const norm = rawStep / mag;
+  const step = (norm >= 5 ? 10 : norm >= 2 ? 5 : norm >= 1 ? 2 : 1) * mag;
+  const ticks = [];
+  for (let t = Math.ceil(min / step) * step; t <= max + step * 1e-9; t += step) {
+    ticks.push(t);
+  }
+  return ticks.length ? ticks : [min, max];
+}
+
+/** Format a value for axis labels (≤4 decimals, no trailing zeros). */
+export function formatValue(v) {
   if (v == null || !isFinite(v)) return "-";
   return String(Math.round(v * 1e4) / 1e4);
 }
