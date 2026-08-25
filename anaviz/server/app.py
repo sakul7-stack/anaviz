@@ -252,7 +252,10 @@ app.mount("/static", StaticFiles(directory=str(settings.frontend_path)), name="f
 
 @app.get("/")
 async def index():
-    return FileResponse(settings.frontend_path / "index.html")
+    # Always revalidate: guarantees browsers pick up new asset versions
+    # (static assets are versioned via ?v=N in index.html).
+    return FileResponse(settings.frontend_path / "index.html",
+                        headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/favicon.ico")

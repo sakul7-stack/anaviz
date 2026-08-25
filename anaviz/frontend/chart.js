@@ -20,6 +20,8 @@ let syncCursorTime = null; // shared time cursor (set from heatmap hover)
 let hoverSyncCallback = null;  // chart hover → heatmap callback
 let chartDrawCallback = null;  // called after every chart redraw
 let tooltipEnricher = null;    // extra tooltip HTML per entity
+let hiddenEntities = new Set(); // entity_ids hidden via legend clicks
+let thresholds = [];            // reference lines [{ value }]
 
 // Public API
 
@@ -57,6 +59,14 @@ export function setChartDrawSync(fn) {
 /** Register callback: extra tooltip HTML per entity. */
 export function setTooltipEnricher(fn) {
   tooltipEnricher = fn;
+}
+
+/** Set horizontal reference lines drawn across the plot area. */
+export function setThresholds(list) {
+  thresholds = (Array.isArray(list) ? list : [])
+    .map((t) => ({ value: Number(t?.value ?? t) }))
+    .filter((t) => Number.isFinite(t.value));
+  if (plot) plot.redraw();
 }
 
 /**
@@ -113,7 +123,47 @@ export function getValuesAtTime(time) {
 
 // Chart init
 
-export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, interpMode) {
+/**
+ * Draw horizontal dashed reference lines (thresholds) across the plot.
+ * Values are interpreted against the primary y scale.
+ */
+function drawThresholds(u) {
+  if (!thresholds.length) return;
+
+  const yScale = u.scales.y;
+  if (yScale?.min == null || yScale?.max == null) return;
+
+  const ctx = u.ctx;
+  const { left, width } = u.bbox;
+
+  ctx.save();
+  ctx.strokeStyle = "#e11d48";
+  ctx.lineWidth = 1;
+  ctx.setLineDash([5, 4]);
+  ctx.font = "600 10px system-ui";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "bottom";
+
+  for (const t of thresholds) {
+    if (t.value < yScale.min || t.value > yScale.max) continue;
+
+    const y = Math.round(u.valToPos(t.value, "y", true)) + 0.5;
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(left + width, y);
+    ctx.stroke();
+
+    ctx.fillStyle = "#e11d48";
+    ctx.fillText(formatThresholdLabel(t.value), left + width - 4, y - 3);
+  }
+  ctx.restore();
+}
+
+function formatThresholdLabel(v) {
+  return String(Math.round(v * 1e4) / 1e4);
+}
+
+export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, interpMode, logY = false) {
   const wrap = document.getElementById("chart");
   wrap.innerHTML = "";
 
@@ -123,6 +173,8 @@ export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, int
   const xScale = zoom
     ? { min: zoom[0], max: zoom[1], time: true }
     : { time: true };
+
+  const yDist = logY ? 3 : 1; // uPlot: 1 = linear, 3 = logarithmic
 
   const series = [{}]; // index 0 is the x-axis placeholder
   const bands = [];
@@ -134,6 +186,7 @@ export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, int
       label: entity.label || entity.name,
       stroke: COLORS[entityIndex % COLORS.length],
       width: 1.5,
+      show: !hiddenEntities.has(entity.entity_id),
     };
     if (scaleKey) cfg.scale = scaleKey;
     if (interpMode === "step") {
@@ -154,7 +207,7 @@ export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, int
 
     selected.slice(0, MAX_SERIES).forEach((entity, i) => {
       const scaleKey = i === 0 ? "y" : `y${i}`;
-      scales[scaleKey] = {};
+      scales[scaleKey] = { distr: yDist };
       const color = COLORS[i % COLORS.length];
       const baseIndex = series.length;
 
@@ -164,8 +217,8 @@ export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, int
       });
 
       if (bandByEntity?.[i]) {
-        series.push({ stroke: "rgba(0,0,0,0)", points: { show: false }, scale: scaleKey });
-        series.push({ stroke: "rgba(0,0,0,0)", points: { show: false }, scale: scaleKey });
+        series.push({ stroke: "rgba(0,0,0,0)", points: { show: false }, scale: scaleKey, show: !hiddenEntities.has(entity.entity_id) });
+        series.push({ stroke: "rgba(0,0,0,0)", points: { show: false }, scale: scaleKey, show: !hiddenEntities.has(entity.entity_id) });
         bands.push({ series: [baseIndex + 2, baseIndex + 1], fill: color + "26" });
       }
 
@@ -186,8 +239,8 @@ export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, int
       series.push(makeSeries(entity, null, i));
 
       if (bandByEntity?.[i]) {
-        series.push({ stroke: "rgba(0,0,0,0)", points: { show: false } });
-        series.push({ stroke: "rgba(0,0,0,0)", points: { show: false } });
+        series.push({ stroke: "rgba(0,0,0,0)", points: { show: false }, show: !hiddenEntities.has(entity.entity_id) });
+        series.push({ stroke: "rgba(0,0,0,0)", points: { show: false }, show: !hiddenEntities.has(entity.entity_id) });
         bands.push({ series: [baseIndex + 2, baseIndex + 1], fill: color + "26" });
       }
     });
@@ -197,10 +250,12 @@ export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, int
       { grid: { show: true }, size: 70 },
     ];
     scales = { x: xScale };
+    if (logY) scales.y = { distr: yDist };
   }
 
-  // Draw hook: sync cursor + trigger redraw callback
+  // Draw hook: thresholds, sync cursor, trigger redraw callback
   const drawHook = (u) => {
+    drawThresholds(u);
     if (syncCursorTime == null) return;
 
     const x = Math.round(u.valToPos(syncCursorTime, "x", true));
@@ -229,10 +284,25 @@ export function initPlot(data, selected, onNav, perEntityAxes, bandByEntity, int
         axes,
         scales,
         bands,
-        cursor: { y: true, x: false },
+        cursor: {
+          y: true,
+          x: false,
+          drag: { x: true, y: false, uni: 15, setScale: false },
+        },
         dblclick: false,
         hooks: {
           draw: [drawHook, () => chartDrawCallback?.()],
+          setSelect: [
+            (u) => {
+              // Shift+drag box select → zoom the x range (fetches new data)
+              const t0 = u.posToVal(u.select.left, "x");
+              const t1 = u.posToVal(u.select.left + u.select.width, "x");
+              if (Number.isFinite(t0) && Number.isFinite(t1) && t1 - t0 > 1e-6) {
+                setZoom(t0, t1);
+                if (onNav) onNav(t0, t1);
+              }
+            },
+          ],
         },
       },
       data,
@@ -319,8 +389,16 @@ function setupTooltip(chart) {
  * Update the chart with new data. Rebuilds if the series count changed,
  * otherwise just updates the data in place.
  */
-export function chartUpdate(data, selected, onNav, perEntityAxes, bandByEntity, entityMeta = [], interpMode) {
+export function chartUpdate(data, selected, onNav, perEntityAxes, bandByEntity, entityMeta = [], interpMode, logY = false) {
   const prevInterpMode = lastRenderData?.interpMode;
+  const prevLogY = lastRenderData?.logY;
+
+  const prevSelectedIds = (lastRenderData?.selected || [])
+    .map((e) => String(e.entity_id))
+    .join(",");
+  const selectedIds = selected.slice(0, MAX_SERIES)
+    .map((e) => String(e.entity_id))
+    .join(",");
 
   lastRenderData = {
     data,
@@ -330,6 +408,8 @@ export function chartUpdate(data, selected, onNav, perEntityAxes, bandByEntity, 
     onNav,
     perEntityAxes,
     interpMode,
+    logY,
+    selectedIds,
   };
 
   if (!data[0]?.length) {
@@ -339,11 +419,19 @@ export function chartUpdate(data, selected, onNav, perEntityAxes, bandByEntity, 
     return;
   }
 
-  const needsRebuild = !plot || plot.series.length !== data.length || interpMode !== prevInterpMode;
+  // Rebuild when anything that shapes series config changed — including
+  // WHICH entities are plotted. A same-length entity swap must not reuse
+  // the old uPlot series objects, or stale show/label/stroke would apply
+  // to different entities (line invisible while tooltip still shows data).
+  const needsRebuild = !plot
+    || plot.series.length !== data.length
+    || interpMode !== prevInterpMode
+    || !!logY !== !!prevLogY
+    || selectedIds !== prevSelectedIds;
 
   if (needsRebuild) {
     destroyPlot();
-    initPlot(data, selected, onNav, perEntityAxes, bandByEntity, interpMode);
+    initPlot(data, selected, onNav, perEntityAxes, bandByEntity, interpMode, logY);
     if (zoom && plot) {
       plot.setScale("x", { min: zoom[0], max: zoom[1] });
     }
@@ -353,12 +441,67 @@ export function chartUpdate(data, selected, onNav, perEntityAxes, bandByEntity, 
       plot.redraw();
     } catch {
       destroyPlot();
-      initPlot(data, selected, onNav, perEntityAxes, bandByEntity, interpMode);
+      initPlot(data, selected, onNav, perEntityAxes, bandByEntity, interpMode, logY);
     }
   }
 }
 
 // Legend
+
+let legendItems = []; // DOM elements, index = entity index
+
+/**
+ * uPlot series indices belonging to an entity (main line + min/max band).
+ */
+function entitySeriesIndices(entityIndex) {
+  const bands = lastRenderData?.bandByEntity || [];
+  let base = 1; // index 0 is the x-axis placeholder
+  for (let i = 0; i < entityIndex; i++) base += bands[i] ? 3 : 1;
+
+  const idxs = [base];
+  if (bands[entityIndex]) idxs.push(base + 1, base + 2);
+  return idxs;
+}
+
+function applyEntityVisibility(entityIndex, visible) {
+  entitySeriesIndices(entityIndex).forEach((si) => {
+    if (plot.series[si]) plot.series[si].show = visible;
+  });
+
+  const entityId = lastRenderData?.selected?.[entityIndex]?.entity_id;
+  if (entityId != null) {
+    if (visible) hiddenEntities.delete(entityId);
+    else hiddenEntities.add(entityId);
+  }
+
+  const item = legendItems[entityIndex];
+  if (item) item.classList.toggle("off", !visible);
+}
+
+/** Legend click: toggle one entity's line (and its band). */
+function toggleEntitySeries(entityIndex) {
+  if (!plot || !lastRenderData) return;
+  const firstIdx = entitySeriesIndices(entityIndex)[0];
+  applyEntityVisibility(entityIndex, !plot.series[firstIdx].show);
+  plot.redraw();
+}
+
+/** Legend double-click: isolate this entity — or show all if already solo. */
+function soloEntitySeries(selectedList, entityIndex) {
+  if (!plot || !lastRenderData) return;
+
+  const count = Math.min(selectedList.length, MAX_SERIES);
+  const onlyThisVisible = legendItems.every((item, j) =>
+    j === entityIndex
+      ? !item.classList.contains("off")
+      : item.classList.contains("off")
+  );
+
+  for (let j = 0; j < count; j++) {
+    applyEntityVisibility(j, onlyThisVisible ? true : j === entityIndex);
+  }
+  plot.redraw();
+}
 
 export function buildLegend(selected) {
   const el = $("#legend");
@@ -369,9 +512,12 @@ export function buildLegend(selected) {
   }
 
   el.innerHTML = "";
+  legendItems = [];
+
   selected.slice(0, MAX_SERIES).forEach((entity, i) => {
     const div = document.createElement("div");
     div.className = "legend-item";
+    div.title = "click: hide/show · double-click: isolate";
 
     const swatch = document.createElement("span");
     swatch.className = "legend-swatch";
@@ -381,6 +527,16 @@ export function buildLegend(selected) {
     name.textContent = entity.label || entity.name;
 
     div.append(swatch, name);
+
+    const visible = plot
+      ? plot.series[entitySeriesIndices(i)[0]]?.show !== false
+      : true;
+    div.classList.toggle("off", !visible);
+
+    div.addEventListener("click", () => toggleEntitySeries(i));
+    div.addEventListener("dblclick", () => soloEntitySeries(selected, i));
+
+    legendItems.push(div);
     el.appendChild(div);
   });
 }
@@ -412,7 +568,8 @@ export function watchChartResize() {
       lastRenderData.perEntityAxes,
       lastRenderData.bandByEntity,
       lastRenderData.entityMeta,
-      lastRenderData.interpMode
+      lastRenderData.interpMode,
+      lastRenderData.logY
     );
   });
 
@@ -437,9 +594,11 @@ function attachInteractions(chart, onNav) {
     onNav(newMin, newMax);
   }, { passive: false });
 
-  // Mouse drag → pan
+  // Mouse drag → pan (plain drag). Shift+drag falls through to uPlot's
+  // native box-select, whose setSelect hook performs the zoom.
   chart.over.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
+    if (e.shiftKey) return;
     e.preventDefault();
     e.stopImmediatePropagation();
 

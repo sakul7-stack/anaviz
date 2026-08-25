@@ -22,7 +22,7 @@ import {
   destroyPlot, chartUpdate, buildLegend,
   setZoom, clearZoom, watchChartResize,
   setChartCursor, setHoverSync, setChartDrawSync,
-  setTooltipEnricher, getValuesAtTime,
+  setTooltipEnricher, getValuesAtTime, setThresholds,
 } from "./chart.js";
 
 import {
@@ -72,7 +72,20 @@ async function loadDataset(id) {
     const datasets = await api("/api/datasets");
     if (!datasets?.length) throw new Error("no datasets configured");
 
-    datasetId = id || datasets[0].id;
+    const targetId = id || datasets[0].id;
+
+    // Switching datasets: drop stale selection and panel content
+    if (targetId !== datasetId) {
+      destroyPlot();
+      document.getElementById("chart").innerHTML = "";
+      selected = [];
+      buildLegend([]);
+      clearHistograms();
+      clearBoxes();
+      clearStatsTable();
+    }
+
+    datasetId = targetId;
     const base = `/api/datasets/${encodeURIComponent(datasetId)}`;
 
     // Fetch entities, schema, and extent in parallel
@@ -91,6 +104,8 @@ async function loadDataset(id) {
     }));
 
     dataExtent = { t0: extent.start, t1: extent.end };
+
+    loadThresholds();
 
     // Update page title
     document.title = `${schema.label} · Time-series Explorer`;
@@ -116,7 +131,7 @@ async function loadDataset(id) {
   }
 }
 
-async function loadDataSources() {
+async function loadDataSources(desiredId = null) {
   try {
     const [datasets, configs] = await Promise.all([
       api("/api/datasets"),
@@ -136,7 +151,11 @@ async function loadDataSources() {
       select.appendChild(option);
     });
 
-    if (previous && datasets.some((d) => d.id === previous)) {
+    // Prefer an explicitly requested dataset (e.g. just registered),
+    // otherwise keep whatever was selected before.
+    if (desiredId && datasets.some((d) => d.id === desiredId)) {
+      select.value = desiredId;
+    } else if (previous && datasets.some((d) => d.id === previous)) {
       select.value = previous;
     }
 
@@ -679,7 +698,8 @@ async function fetchData() {
 
   if (stats.hasData) {
     chartUpdate(data, selected, navigateTo,
-      $("#perAxis").checked, bandByEntity, entityMeta, interpMode);
+      $("#perAxis").checked, bandByEntity, entityMeta, interpMode,
+      $("#logY").checked);
     buildLegend(selected);
   }
 
@@ -790,10 +810,21 @@ $("#registerConfig")?.addEventListener("click", async () => {
 
   $("#stats").textContent = "Registering…";
   try {
-    await apiPost("/api/configs", { config: payload });
+    // Remember known dataset ids so we can detect the one just added
+    const known = new Set((((await api("/api/datasets")) || [])).map((d) => d.id));
+
+    const result = await apiPost("/api/configs", { config: payload });
+    const datasets = (await api("/api/datasets")) || [];
+    const addedId = result?.id
+      ?? result?.dataset?.id
+      ?? datasets.find((d) => !known.has(d.id))?.id;
+
     $("#configJson").value = "";
     $("#stats").textContent = "Registered";
-    await loadDataSources();
+
+    // Load the freshly registered dataset right away (falls back to the
+    // previously selected one if detection failed)
+    await loadDataSources(addedId);
   } catch (err) {
     $("#stats").textContent = `Failed: ${err.message}`;
   }
@@ -817,7 +848,8 @@ function rerenderInterpolation() {
     // Force full rebuild to guarantee visual update
     destroyPlot();
     chartUpdate(data, selected, navigateTo,
-      $("#perAxis").checked, bandByEntity, entityMeta, interpMode);
+      $("#perAxis").checked, bandByEntity, entityMeta, interpMode,
+      $("#logY").checked);
     if (isHistogramVisible()) {
       updateHistograms(selected, lastRenderData, getHistogramBinCount());
     }
@@ -865,9 +897,77 @@ $("#perAxis").addEventListener("change", () => {
     chartUpdate(
       lastRenderData.data, selected, navigateTo,
       $("#perAxis").checked, lastRenderData.bandByEntity, lastRenderData.entityMeta,
-      lastRenderData.interpMode
+      lastRenderData.interpMode, lastRenderData.logY
     );
   }
+});
+
+// Log Y scale
+$("#logY").addEventListener("change", () => {
+  if (!lastRenderData?.data || !selected.length) return;
+  destroyPlot();
+  chartUpdate(
+    lastRenderData.data, selected, navigateTo,
+    $("#perAxis").checked, lastRenderData.bandByEntity, lastRenderData.entityMeta,
+    lastRenderData.interpMode, $("#logY").checked
+  );
+});
+
+// Threshold reference lines
+
+let thresholds = [];
+
+function loadThresholds() {
+  try {
+    thresholds = JSON.parse(localStorage.getItem(`thresholds_${datasetId}`)) || [];
+  } catch {
+    thresholds = [];
+  }
+  thresholds = thresholds.filter((t) => Number.isFinite(t?.value));
+  setThresholds(thresholds);
+  renderThresholdList();
+}
+
+function persistThresholds() {
+  localStorage.setItem(`thresholds_${datasetId}`, JSON.stringify(thresholds));
+}
+
+function renderThresholdList() {
+  const list = $("#threshList");
+  if (!list) return;
+
+  list.innerHTML = "";
+  thresholds.forEach((t, i) => {
+    const chip = document.createElement("span");
+    chip.className = "thresh-chip";
+    chip.textContent = String(Math.round(t.value * 1e4) / 1e4);
+
+    const del = document.createElement("button");
+    del.className = "config-del";
+    del.textContent = "✕";
+    del.onclick = () => {
+      thresholds.splice(i, 1);
+      persistThresholds();
+      setThresholds(thresholds);
+      renderThresholdList();
+    };
+
+    chip.append(del);
+    list.append(chip);
+  });
+}
+
+$("#addThresh")?.addEventListener("click", () => {
+  const value = parseFloat($("#threshVal").value);
+  if (!Number.isFinite(value)) return;
+
+  if (!thresholds.some((t) => t.value === value)) {
+    thresholds.push({ value });
+    persistThresholds();
+    setThresholds(thresholds);
+    renderThresholdList();
+  }
+  $("#threshVal").value = "";
 });
 
 // Window resize

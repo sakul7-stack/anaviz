@@ -26,7 +26,15 @@
       <div class="algo-row"><label>Interpolation</label>
         <select id="interpMode"><option value="linear" selected>Linear</option><option value="step">Step / Deadband</option></select>
       </div>
+      <div class="algo-row"><label>Threshold lines</label>
+        <div class="thresh-add">
+          <input type="number" id="threshVal" step="any" placeholder="y value">
+          <button id="addThresh">+ Add</button>
+        </div>
+        <div id="threshList"></div>
+      </div>
       <label class="toggle-row"><input type="checkbox" id="perAxis"><span>Per-entity Y axes</span></label>
+      <label class="toggle-row"><input type="checkbox" id="logY"><span>Log Y scale</span></label>
       <label class="toggle-row"><input type="checkbox" id="showHeatmap"><span>Entity heatmap</span></label>
       <label class="toggle-row"><input type="checkbox" id="showStats"><span>Summary statistics</span></label>
       <label class="toggle-row"><input type="checkbox" id="showBox"><span>Box plots</span></label>
@@ -42,7 +50,7 @@
       <div id="configList" class="config-list"></div>
     </details>
     <input type="text" id="filter" placeholder="filter entities…">
-    <div class="help">Select entities · set date range · click Go</div>
+    <div class="help">Select entities · set date range · click Go<br>wheel: zoom · drag: pan · shift+drag: box zoom</div>
     <div id="entitylist"></div>
   </div>
   <div id="main">
@@ -91,6 +99,6 @@
   </div>
 </div>
 <div id="tooltip"></div>
-<script type="module" src="static/app.js?v=8"></script>
+<script type="module" src="static/app.js?v=11"></script>
 </body>
 </html>
