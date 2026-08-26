@@ -36,7 +36,8 @@ import psycopg
 
 DB_URL            = "postgresql://dcs:dcs@localhost:5434/dcs"
 ELEMENT_ID_OFFSET = 900_000
-COPY_CHUNK        = 4 << 20   # 4 MiB per COPY flush
+COPY_CHUNK        = 4 << 20   # 4 MiB per COPY transport read
+FLUSH_BYTES       = 64 << 20  # commit batch: one txn per 64 MiB of rows
 
 
 def short_name(full_col: str, idx: int) -> str:
@@ -102,30 +103,29 @@ def ingest_file(path: Path, col_to_eid: dict[str, int],
 
     print(f"  Reading {path.name} ({path.stat().st_size/1e6:.0f} MB) ...")
 
-    # Read in chunks to avoid loading 2 GB at once
-    chunksize = 5000
+    # Read in chunks to avoid loading 2 GB at once. The wide→long unpivot
+    # runs in C (stack/dropna/to_csv); only non-NaN cells reach the buffer.
+    chunksize = 2000
     reader = pd.read_csv(path, index_col=0, parse_dates=True, chunksize=chunksize)
 
     for chunk_n, df in enumerate(reader):
         df.index = pd.to_datetime(df.index, utc=True)
 
-        for col in df.columns:
-            eid = col_to_eid.get(col)
-            if eid is None:
-                continue
-            col_data = df[col].values
-            for ts, val in zip(df.index, col_data):
-                if isinstance(val, float) and np.isnan(val):
-                    continue
-                buf.write(f"{eid},{ts.isoformat()},{val:.8g},0\n")
-                written += 1
+        usable = {c: e for c, e in col_to_eid.items() if c in df.columns}
+        if usable:
+            long = (df[list(usable)].rename(columns=usable)
+                    .stack().dropna().reset_index())
+            long.columns = ["ts", "element_id", "value"]
+            long["quality_flag"] = 0
+            long.to_csv(buf, index=False, header=False,
+                        columns=["element_id", "ts", "value", "quality_flag"])
+            written += len(long)
 
         # Flush COPY buffer periodically
-        if buf.tell() >= COPY_CHUNK:
+        if buf.tell() >= FLUSH_BYTES:
             flush_buffer()
 
-        if chunk_n % 50 == 0:
-            print(f"    ... {written:,} rows so far", end="\r", flush=True)
+        print(f"    ... chunk {chunk_n}: {written:,} rows", flush=True)
 
     # Final flush
     flush_buffer()
@@ -169,6 +169,9 @@ def ingest(data_dir: str, files: str, db_url: str) -> None:
     except Exception as e:
         sys.exit(f"ERROR: {e}")
     cur = conn.cursor()
+    # Bulk-load mode: don't fsync WAL on every commit (big crash window, but
+    # the upsert makes re-running after a crash fully safe).
+    cur.execute("SET synchronous_commit TO OFF")
     try:
         cur.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_eventhistory_element_ts "

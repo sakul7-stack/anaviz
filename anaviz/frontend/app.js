@@ -643,7 +643,8 @@ $("#exportBoxCsv").onclick = () => {
 async function fetchData() {
   if (!selected.length || view.t0 === null) return;
 
-  $("#stats").textContent = "Loading…";
+  $("#stats").innerHTML = '<span class="loading-text">Loading…</span>';
+  document.body.classList.add("loading");
 
   // Cancel previous request
   if (abortController) abortController.abort();
@@ -724,6 +725,7 @@ async function fetchData() {
   const heatmapData = await heatmapPromise;
   if (myId !== requestSequence) return;
   stopStatusPoll();
+  document.body.classList.remove("loading");
 
   // Update heatmap
   if (isHeatmapVisible()) {

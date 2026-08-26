@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "dataset": {
+    "id": "default",
+    "label": "ATLAS HLT Archive",
+    "description": "Bundled HLT p-beat datasource served at :9000 (/archive/*)"
+  },
+  "source": {
+    "type": "http",
+    "base_url": "http://datasource:9000",
+    "timeout_seconds": 300
+  },
+  "endpoints": {
+    "entities": { "path": "/archive/channels" },
+    "extent":   { "path": "/archive/extent", "start_path": "t_min", "end_path": "t_max" },
+    "series": {
+      "path": "/archive/eventhistory",
+      "shape": "columnar",
+      "parameters": { "entity": "element_id", "start": "t0", "end": "t1" },
+      "offset_param": "offset",
+      "limit_param": "limit",
+      "next_offset_path": "next_offset"
+    }
+  },
+  "mapping": {
+    "entity_id": "element_id",
+    "entity_label": "name",
+    "timestamp": "t",
+    "timestamp_format": "unix",
+    "measures": {
+      "value": { "value_path": "value", "label": "Event Rate", "unit": "Hz", "type": "number" }
+    },
+    "quality": "quality_flag"
+  },
+  "pagination": { "type": "offset", "page_size": 50000, "max_pages": 100 },
+  "row_cap": 200000,
+  "rollup_levels": [60, 300, 3600]
+}

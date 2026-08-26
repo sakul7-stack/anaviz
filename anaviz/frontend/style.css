@@ -46,7 +46,7 @@ header .stats{color:var(--dim);font-size:12px;margin-left:auto;font-variant-nume
 .config-info{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .config-del{border:none;background:transparent;color:var(--dim);cursor:pointer;font-size:11px;padding:2px 4px}
 .config-del:hover{color:#b00;background:var(--hover)}
-#entitylist{flex:1;overflow:auto}
+#entitylist{flex:1 1 0;min-height:150px;overflow:auto;border-top:1px solid var(--border);padding-top:4px}
 #entitylist label{display:flex;align-items:center;gap:6px;padding:3px 6px;cursor:pointer;border-radius:3px;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #entitylist label:hover{background:var(--hover)}
 .empty-state{padding:14px 10px;text-align:center;color:var(--dim);border:1px dashed var(--border);border-radius:6px;margin:6px 0}
@@ -108,3 +108,13 @@ header .stats{color:var(--dim);font-size:12px;margin-left:auto;font-variant-nume
 .box-canvas{width:100%;display:block;background:var(--panel);border:1px solid var(--border);border-radius:4px;cursor:crosshair}
 #box-tooltip{position:fixed;pointer-events:none;display:none;background:rgba(255,255,255,.98);border:1px solid #ddd;padding:6px 9px;font-size:11px;border-radius:6px;box-shadow:0 3px 14px rgba(0,0,0,.12);z-index:120;line-height:1.5;white-space:nowrap}
 #box-tooltip b{font-weight:600}
+
+/* Loading indicator: top progress bar + pulsing text */
+#loadbar{position:fixed;top:0;left:0;right:0;height:3px;z-index:300;pointer-events:none}
+#loadbar::before{content:"";position:absolute;inset:0;background:var(--border);opacity:0;transition:opacity .2s}
+#loadbar::after{content:"";position:absolute;top:0;bottom:0;left:-38%;width:38%;background:linear-gradient(90deg,transparent,var(--accent),transparent);opacity:0;transition:opacity .2s}
+body.loading #loadbar::before,body.loading #loadbar::after{opacity:1}
+body.loading #loadbar::after{animation:loadslide 1.8s cubic-bezier(.4,0,.2,1) infinite}
+@keyframes loadslide{from{left:-38%}to{left:100%}}
+@keyframes loadpulse{0%,100%{opacity:1}50%{opacity:.35}}
+.loading-text{animation:loadpulse 1s ease-in-out infinite;color:var(--accent);font-weight:600}
