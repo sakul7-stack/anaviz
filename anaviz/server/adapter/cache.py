@@ -146,13 +146,13 @@ class GenericCache:
                 await self._store_rollup(conn.cursor(), entity_id, measure_id, bucket_rows)
 
     # Read
-    async def read_rollup(self, entity_id, measure_id, bucket_s, start, end, cap):
+    async def read_rollup(self, entity_id, measure_id, bucket_s, start, end):
         lo = datetime.fromtimestamp(
             (start.timestamp() // bucket_s) * bucket_s, tz=timezone.utc)
         async with self.pool.connection() as conn:
             cur = await conn.execute(
                 READ_ROLLUP, (self.dataset_key, entity_id, measure_id,
-                              bucket_s, lo, end, cap))
+                              bucket_s, lo, end))
             return RollupData.from_rows(await cur.fetchall())
 
     async def count(self, entity_id, measure_id, start, end):
@@ -161,18 +161,18 @@ class GenericCache:
                 COUNT, (self.dataset_key, entity_id, measure_id, start, end))
             return int((await cur.fetchone())[0])
 
-    async def read_bucketed(self, entity_id, measure_id, bucket_s, start, end, cap):
+    async def read_bucketed(self, entity_id, measure_id, bucket_s, start, end):
         async with self.pool.connection() as conn:
             cur = await conn.execute(
                 READ_BUCKETED, (bucket_s, bucket_s, self.dataset_key,
-                                entity_id, measure_id, start, end, cap))
+                                entity_id, measure_id, start, end))
             rows = await cur.fetchall()
-        return RollupData.from_rows(rows, truncated=len(rows) >= cap)
+        return RollupData.from_rows(rows)
 
-    async def read(self, entity_id, measure_id, start, end, cap):
+    async def read(self, entity_id, measure_id, start, end):
         async with self.pool.connection() as conn:
             cur = await conn.execute(
-                READ, (self.dataset_key, entity_id, measure_id, start, end, cap))
+                READ, (self.dataset_key, entity_id, measure_id, start, end))
             rows = await cur.fetchall()
         if not rows:
             return (np.array([], dtype=float), np.array([], dtype=float),

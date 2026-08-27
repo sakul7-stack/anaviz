@@ -161,7 +161,7 @@ class FakeRollupCache(FakeCache):
         pass
 
     async def read_rollup(self, entity_id, measure_id, bucket_s,
-                          start, end, cap):
+                          start, end):
         bucket = self.series.get((entity_id, measure_id), [])
         rows = [r for r in bucket if start <= r[0] < end]
         if not rows:
@@ -183,7 +183,7 @@ class LegacyCache(FakeCache):
         self.buckets: dict[tuple, list] = {}
 
     async def read_rollup(self, entity_id, measure_id, bucket_s,
-                          start, end, cap):
+                          start, end):
         self.rollup_reads += 1
         rows = self.buckets.get((entity_id, measure_id, float(bucket_s)), [])
         rows = [r for r in rows if start.timestamp() <= r[0] < end.timestamp()]
@@ -228,7 +228,6 @@ DENSE_CONFIG = {
         "quality": "quality_flag",
     },
     "pagination": {"type": "offset", "page_size": 20000, "max_pages": 10},
-    "row_cap": 100_000,
     "rollup_enabled": True,
     "rollup_levels": [1, 4, 16, 64, 256],
 }
@@ -301,11 +300,10 @@ def test_query_backfills_legacy_cache_without_rollup_rows():
     assert cache.rollup_stores == 1
 
 
-def test_query_backfill_truncated_never_persists_partial_rollup():
+def test_query_backfill_persists_complete_rollup():
+    """When all raw rows are read, the backfilled rollup is persisted."""
     config = dict(DENSE_CONFIG)
-    config["row_cap"] = 5000          # read cap smaller than stored raw rows
     cache = LegacyCache()
-    # a legacy cache holding more raw rows than the current read cap
     key = ("default:10", "value")
     cache.series[key] = [
         (datetime.fromtimestamp(t, tz=timezone.utc), v, q)
@@ -314,9 +312,7 @@ def test_query_backfill_truncated_never_persists_partial_rollup():
     adapter = _adapter(cache, config=config)
     result = asyncio.run(run_query(adapter, _big_request())).series[0]
     assert result.resolution == "16s"
-    assert result.metrics.truncated is True
-    assert result.fidelity["truncated"] is True
-    assert cache.rollup_stores == 0    # partial buckets must not be persisted
+    assert cache.rollup_stores == 1    # complete rollup is persisted
 
 
 def test_backfill_never_double_counts_existing_buckets():
@@ -444,14 +440,11 @@ def test_rollup_can_be_disabled_per_dataset():
 
 # No-data-loss dense raw ranges
 
-def test_query_dense_raw_range_never_truncates():
-    """A raw-mode range denser than row_cap must be aggregated in the DB over
-    ALL rows (one bucket per pixel) — never cut off at the cap."""
+def test_query_dense_raw_range_uses_raw_path():
+    """A raw-mode range always uses the raw read path with LTTB downsampling."""
     config = {k: v for k, v in DENSE_CONFIG.items()
               if k not in ("rollup_enabled", "rollup_levels")}
-    config["row_cap"] = 5000          # dense range far exceeds the cap
     cache = LegacyCache()
-    # pre-seed a cache holding far more rows than the read cap (dense range)
     key = ("default:10", "value")
     cache.series[key] = [
         (datetime.fromtimestamp(t, tz=timezone.utc), v, q)
@@ -461,26 +454,25 @@ def test_query_dense_raw_range_never_truncates():
                           _dt(0), _dt(36000), "queried"))
     adapter = _adapter(cache, config=config)
     result = asyncio.run(run_query(adapter, _big_request())).series[0]
-    # served aggregated from the full range, not truncated raw rows
-    assert result.resolution != "raw"
-    assert result.fidelity["aggregated"] is True
-    assert result.fidelity["query_aggregated"] is True
+    # served via raw path with LTTB downsampling
+    assert result.resolution == "raw"
+    assert result.fidelity["aggregated"] is False
     assert result.fidelity["truncated"] is False
     assert result.metrics.truncated is False
-    # every source row contributed — rows_source is the FULL count
+    # every source row contributed
     assert result.metrics.rows_source == 35900
-    # the bucketed read is much smaller than the raw row count
-    assert result.metrics.rows_scanned < result.metrics.rows_source
-    # the source gap survives bucketing
+    # downsampled to pixel budget
+    assert result.metrics.rows_returned <= result.metrics.rows_scanned
+    # the source gap survives
     assert len(result.gaps) >= 1
     assert any(lo <= 5005 <= hi for lo, hi in result.gaps)
 
 
-def test_query_small_raw_range_below_cap_stays_raw():
-    """Ranges within row_cap keep the exact raw path — no aggregation."""
+def test_query_small_raw_range_stays_raw():
+    """Raw-mode ranges use the raw read path with LTTB downsampling."""
     config = {k: v for k, v in DENSE_CONFIG.items()
               if k not in ("rollup_enabled", "rollup_levels")}
-    adapter = _adapter(config=config)   # row_cap 100k > 35.9k rows
+    adapter = _adapter(config=config)
     result = asyncio.run(run_query(adapter, _big_request())).series[0]
     assert result.resolution == "raw"
     assert result.fidelity["aggregated"] is False
@@ -488,11 +480,10 @@ def test_query_small_raw_range_below_cap_stays_raw():
     assert result.metrics.rows_scanned == result.metrics.rows_source == 35900
 
 
-def test_matrix_dense_range_never_truncates():
-    """Matrix view on a dense range must also use the full-range aggregation."""
+def test_matrix_dense_range_uses_raw_read():
+    """Matrix view on a dense range reads raw data for z-score computation."""
     config = {k: v for k, v in DENSE_CONFIG.items()
               if k not in ("rollup_enabled", "rollup_levels")}
-    config["row_cap"] = 5000
     cache = LegacyCache()
     key = ("default:10", "value")
     cache.series[key] = [
@@ -523,7 +514,7 @@ def test_read_bucketed_epoch_anchor_negative_timestamps():
         (datetime.fromtimestamp(t, tz=timezone.utc), float(t), 0)
         for t in range(-300, 0, 1)]     # -300s .. -1s (pre-epoch)
     rows = asyncio.run(cache.read_bucketed(
-        "default:10", "value", 60.0, _dt(-300), _dt(0), 1000))
+        "default:10", "value", 60.0, _dt(-300), _dt(0)))
     assert rows is not None and len(rows.t) == 5   # buckets at -300,-240,...
     # bucket first_ts anchored at floor(-300/60)*60 = -300
     assert rows.t[0] == -300.0
@@ -532,11 +523,9 @@ def test_read_bucketed_epoch_anchor_negative_timestamps():
 
 
 def test_query_dense_rows_source_exact_at_cap():
-    """rows_source must report the true cached row count even when the bucket
-    LIMIT (cap) is hit — never a partial sum of returned buckets."""
+    """rows_source must report the true cached row count."""
     config = {k: v for k, v in DENSE_CONFIG.items()
               if k not in ("rollup_enabled", "rollup_levels")}
-    config["row_cap"] = 5000
     cache = LegacyCache()
     key = ("default:10", "value")
     cache.series[key] = [

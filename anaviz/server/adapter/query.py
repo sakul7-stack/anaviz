@@ -186,17 +186,7 @@ async def _raw_series(adapter, eid, mid, spec, start, end, budget, algo, src_ms,
     if total == 0:
         return _empty_series(adapter, eid, mid, spec, src_ms, t0)
 
-    if total > adapter.config.row_cap:
-        span = (end - start).total_seconds()
-        bkt = span / max(budget, 1)
-        data = await cache.read_bucketed(eid, mid, bkt, start, end,
-                                         max(adapter.config.row_cap, budget))
-        if data is None or len(data.t) == 0:
-            return _empty_series(adapter, eid, mid, spec, src_ms, t0)
-        return _serve_bucketed(adapter, data, bkt, eid, mid, spec, algo, budget, src_ms, t0,
-                               query_aggregated=True, rows_source=total)
-
-    t, v, q, total, truncated = await cache.read(eid, mid, start, end, adapter.config.row_cap)
+    t, v, q, total, truncated = await cache.read(eid, mid, start, end)
     if len(t) == 0:
         return _empty_series(adapter, eid, mid, spec, src_ms, t0, truncated)
 
@@ -260,10 +250,10 @@ def _serve_bucketed(adapter, data, bkt_s, eid, mid, spec, algo, budget,
 
 async def _rollup_series(adapter, eid, mid, spec, start, end, bkt_s, budget, algo, src_ms, t0):
     cache = adapter.cache
-    data = await cache.read_rollup(eid, mid, bkt_s, start, end, adapter.config.row_cap)
+    data = await cache.read_rollup(eid, mid, bkt_s, start, end)
     truncated = False
     if data is None or len(data.t) == 0:
-        t, v, q, _, truncated = await cache.read(eid, mid, start, end, adapter.config.row_cap)
+        t, v, q, _, truncated = await cache.read(eid, mid, start, end)
         if len(t) == 0:
             return _empty_series(adapter, eid, mid, spec, src_ms, t0, truncated, resolution=tier_name(bkt_s))
         _learn_step(adapter, t)
@@ -277,7 +267,7 @@ async def _rollup_series(adapter, eid, mid, spec, start, end, bkt_s, budget, alg
                 rows = [r for r in rows if int(r[0] // bkt_s) not in existing]
             if rows:
                 await cache.store_rollup(eid, mid, {bkt_s: rows})
-                data = await cache.read_rollup(eid, mid, bkt_s, start, end, adapter.config.row_cap)
+                data = await cache.read_rollup(eid, mid, bkt_s, start, end)
         if data is None or len(data.t) == 0:
             return _empty_series(adapter, eid, mid, spec, src_ms, t0, truncated, resolution=tier_name(bkt_s))
     return _serve_bucketed(adapter, data, bkt_s, eid, mid, spec, algo, budget, src_ms, t0,
@@ -309,16 +299,7 @@ async def run_matrix(adapter, request: MatrixQuery) -> MatrixResult:
         if total == 0:
             grid.append([None] * request.pixel_width)
             continue
-        if total > adapter.config.row_cap:
-            bkt = span / max(request.pixel_width, 1)
-            data = await cache.read_bucketed(eid, request.measure_id, bkt, start, end,
-                                             max(adapter.config.row_cap, request.pixel_width))
-            if data is None or len(data.t) == 0:
-                grid.append([None] * request.pixel_width)
-                continue
-            t, v = data.t, data.avg
-        else:
-            t, v, _, _, _ = await cache.read(eid, request.measure_id, start, end, adapter.config.row_cap)
+        t, v, _, _, _ = await cache.read(eid, request.measure_id, start, end)
         z = rolling_zscore(bin_values(t, v, edges), 10)
         normed = (np.clip(z, -3.0, 3.0) + 3.0) / 6.0
         grid.append([round(float(x), 4) if np.isfinite(x) else None for x in normed])

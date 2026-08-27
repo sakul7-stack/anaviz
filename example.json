@@ -33,6 +33,5 @@
     "quality": "quality_flag"
   },
   "pagination": { "type": "offset", "page_size": 50000, "max_pages": 100 },
-  "row_cap": 200000,
   "rollup_levels": [60, 300, 3600]
 }

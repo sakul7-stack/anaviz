@@ -40,7 +40,7 @@ FROM (
     WHERE dataset_key = %s AND entity_id = %s AND measure_id = %s
       AND ts >= %s AND ts < %s
 ) q
-ORDER BY ts LIMIT %s
+ORDER BY ts
 """
 
 READ_BUCKETED = """
@@ -67,7 +67,7 @@ FROM (
     WHERE dataset_key = %s AND entity_id = %s AND measure_id = %s
       AND ts >= %s AND ts < %s
 ) sub
-GROUP BY idx ORDER BY idx LIMIT %s
+GROUP BY idx ORDER BY idx
 """
 
 # Rollup
@@ -116,7 +116,7 @@ SELECT
 FROM cache_rollup
 WHERE dataset_key = %s AND entity_id = %s AND measure_id = %s
   AND bucket_s = %s AND bucket_start >= %s AND bucket_start < %s
-ORDER BY bucket_start LIMIT %s
+ORDER BY bucket_start
 """
 
 # Cleanup

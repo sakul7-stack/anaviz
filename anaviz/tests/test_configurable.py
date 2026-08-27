@@ -47,23 +47,21 @@ class FakeCache:
         for a, b, status in intervals:
             self.covered.append((entity_id, measure_id, a, b, status))
 
-    async def read(self, entity_id, measure_id, start, end, cap):
+    async def read(self, entity_id, measure_id, start, end):
         bucket = self.series.get((entity_id, measure_id), [])
         rows = [r for r in bucket if start <= r[0] < end]
         total = len(rows)
-        truncated = total > cap
-        rows = rows[:cap]
         t = np.array([r[0].timestamp() for r in rows], dtype=float)
         v = np.array([r[1] for r in rows], dtype=float)
         q = np.array([r[2] for r in rows], dtype=np.int16)
-        return t, v, q, total, truncated
+        return t, v, q, total, False
 
     async def count(self, entity_id, measure_id, start, end):
         bucket = self.series.get((entity_id, measure_id), [])
         return len([r for r in bucket if start <= r[0] < end])
 
     async def read_bucketed(self, entity_id, measure_id, bucket_s,
-                            start, end, cap):
+                            start, end):
         from server.adapter.downsample.rollup import aggregate_buckets
         bucket = self.series.get((entity_id, measure_id), [])
         rows = [r for r in bucket if start <= r[0] < end]
@@ -107,7 +105,6 @@ ARCHIVE_CONFIG = {
         "quality": "quality_flag",
     },
     "pagination": {"type": "offset", "page_size": 2, "max_pages": 10},
-    "row_cap": 1000,
 }
 
 # Source data: element 10 has a gap between t=40 and t=90

@@ -150,7 +150,6 @@ class DatasetConfig(BaseModel):
     # false to force every range to raw rows even if levels are declared).
     rollup_enabled: bool = True
     rollup_levels: list[float] | None = None
-    row_cap: int = Field(default=200_000, ge=1, le=5_000_000)
     capabilities: list[str] = Field(default_factory=lambda: list(DEFAULT_CAPABILITIES))
 
     @field_validator("rollup_levels")

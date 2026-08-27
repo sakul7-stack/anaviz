@@ -170,8 +170,6 @@ class ConfigurableAdapter:
             if nxt <= offset:
                 break
             offset = int(nxt)
-            if len(rows) >= cfg.row_cap:
-                rows = rows[:cfg.row_cap]; truncated = True; break
         return rows, truncated
 
     def _rollup_levels(self):

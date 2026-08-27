@@ -118,8 +118,3 @@ def test_configs_dir_loader_skips_bad_files(tmp_path):
     assert len(configs) == 1
     assert configs[0].dataset.id == "sensors"
     assert load_configs_from_dir(tmp_path / "missing") == []
-
-
-def test_row_cap_bounds():
-    config = parse_config(_minimal(**{"row_cap": 5000}))
-    assert config.row_cap == 5000
